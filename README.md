@@ -94,73 +94,49 @@ This project is developed and maintained by **GT Labs AI**.
 ## 📁 Структура Репозитория
 
 ```
-weight_synthesizer/
-├── make_profile.py              # Калибратор профиля активаций для 3B моделей (50 КБ)
-├── make_profile_7b.py           # Калибратор профиля активаций для 7B/8B моделей (120 КБ)
-├── convert_global.py            # Конвертер 3B модели в формат INT4/INT8
-├── convert_global_7b.py         # Конвертер 7B/8B моделей в формат INT4/INT8
-├── otf_triton_kernel.py         # Кастомное Fused Triton INT4 GEMM ядро
-├── run_triton.py                # Инференс-движок 3B модели (1.94 ГБ Static VRAM)
-├── run_triton_7b.py             # Инференс-движок 7B модели (4.20 ГБ Static VRAM)
-├── server_fastapi.py            # Продуктовый REST API Сервер (FastAPI + SSE Стриминг)
-├── test_client.py               # Потоковый клиент для проверки SSE-стриминга
-├── query_guided_sparse_kv.py    # Предиктивный вызов контекста (CPU RAM -> GPU)
-├── otf_context_compressor.py    # Модуль SnapKV / KIVI асимметричного сжатия кэша
-├── benchmark_profiler.py        # Побайтовый профилировщик весов и VRAM
-├── test_intelligence_suite.py   # Бенчмарк интеллекта и логики на сжатом движке
-├── test_base_model_suite.py     # A/B бенчмарк базовой FP16 модели
-├── otf_qwen2.5_3b_global_symmetric.pt # Чекпоинт сжатой 3B модели (~2.08 ГБ)
-├── otf_7b_global_symmetric.pt   # Чекпоинт сжатой 7B модели (~4.18 ГБ)
-├── README.md                    # Документация проекта
-└── LICENSE                      # Лицензия MIT
+otf-llm-engine/
+├── make_profile_universal.py                 # Универсальный калибратор профиля активаций
+├── convert_global_universal.py               # Универсальный послойный квантователь в Safetensors
+├── run_triton_universal.py                   # Универсальный Triton GEMM инференс-раннер
+├── otf_triton_kernel.py                      # Кастомное Fused Triton INT4 GEMM ядро
+├── pipeline_run.py                           # Автоматический сквозной пайплайн в 1 клик
+├── server_fastapi.py                         # Продуктовый REST API сервер (OpenAI API + SSE)
+├── test_client.py                            # Потоковый клиент для проверки SSE-стриминга
+├── query_guided_sparse_kv.py                 # Предиктивный вызов контекста (CPU RAM -> GPU)
+├── otf_context_compressor.py                 # SnapKV / KIVI модуль сжатия кэша
+├── benchmark_profiler.py                     # Побайтовый профилировщик весов и VRAM
+├── test_intelligence_suite.py                # Бенчмарк интеллекта и логики
+├── test_base_model_suite.py                  # A/B бенчмарк базовой FP16 модели
+├── qwen2.5_7b_instruct_act_profile.pt        # Калибровочный профиль (~2.3 МБ)
+├── otf_qwen2.5_7b_instruct_compressed.safetensors # Сжатый чекпоинт (~4.18 ГБ)
+├── README.md                                 # Главная документация проекта
+└── LICENSE                                   # Лицензия MIT
 ```
 
 ---
 
-## 🛠️ Быстрый Запуск
+## 🛠️ Быстрый Запуск (Универсальный Пайплайн)
 
-### 1. Установка зависимостей
+### 1. Автоматический запуск в 1 команду (Профиль ➔ Сжатие ➔ Инференс)
+
+Для сжатия и проверки любой модели (Qwen, Llama, Mistral) запустите сквозной пайплайн:
 
 ```bash
-# Активация виртуального окружения
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux
-
-# Установка PyTorch, Transformers и FastAPI
-pip install torch transformers fastapi uvicorn pydantic requests
-
-# Установка OpenAI Triton
-pip install triton-windows  # Для Windows
-# pip install triton        # Для Linux
+python pipeline_run.py --model_id Qwen/Qwen2.5-7B-Instruct
 ```
 
-### 2. Запуск 7B Модели (Qwen2.5-7B-Instruct в 4.20 ГБ VRAM)
+### 2. Запуск готового Triton Engine (3.7 сек старт, 4.20 ГБ VRAM, 0 МБ FP16 в ОЗУ)
 
 ```bash
-# 1. Снятие профиля активаций (3 сек)
-python make_profile_7b.py
-
-# 2. Квантование модели в INT4/INT8 (10 сек)
-python convert_global_7b.py
-
-# 3. Автономный запуск инференса
-python run_triton_7b.py
+python run_triton_universal.py --model_id Qwen/Qwen2.5-7B-Instruct
 ```
 
-### 3. Запуск REST API Сервера (OpenAI API Compatible + SSE Streaming)
+### 3. Запуск REST API Сервера для VS Code / Веб-клиентов
 
 ```bash
-# Запуск асинхронного FastAPI сервера
 python server_fastapi.py
 ```
-*Сервер поднимется на `http://localhost:8000`. Эндпоинт проверки здоровья: `http://localhost:8000/health`.*
-
-### 4. Проверка потокового SSE-стриминга
-
-В отдельном терминале запустите клиент:
-```bash
-python test_client.py
-```
+*Эндпоинт генерации: `http://localhost:8000/v1/chat/completions` (OpenAI spec).*
 
 ---
 
