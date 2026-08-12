@@ -1,6 +1,6 @@
 # 🚀 On-The-Fly Weight Synthesizer (OTF-LLM Engine)
 
-> **Высокоэффективный гибридный движок инференса LLM с кастомными Fused Triton INT4 GEMM ядрами, Outlier-Aware квантованием весов, глобальной перестановкой активаций, INT8-словарем, сжатием VRAM до 1.94 ГБ (3B) / 4.20 ГБ (7B) и продуктовым REST API сервером.**
+> **High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels, Outlier-Aware weight quantization, global activation permutation, INT8 embeddings, VRAM compression down to 1.94 GB (3B) / 4.20 GB (7B), and a production-grade REST API server.**
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-Supported-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
@@ -22,146 +22,146 @@ This project is developed and maintained by **GT Labs AI**.
 
 ---
 
-## 🎯 Цель Проекта
+## 🎯 Project Goal
 
-Преодоление барьера **Memory-Bound** и аппаратных ограничений VRAM при работе с большими языковыми моделями (LLM) и длинным контекстом на потребительских видеокартах.
+Overcoming memory-bound bottlenecks and hardware VRAM constraints when executing Large Language Models (LLMs) with long context windows on consumer GPUs.
 
-Вместо перекачки тяжелых FP16 весов из VRAM, **OTF-LLM Engine** использует аппаратную деквантовку Outlier-Aware INT4 весов **прямиком в регистрах GPU (SRAM)** через кастомные **OpenAI Triton GEMM Kernels**, сжимает словарь (`embed_tokens`) и классификатор (`lm_head`), а также использует предиктивную выгрузку контекста **Query-Guided Sparse Offloading**.
+Instead of transferring heavy FP16 weights from VRAM, **OTF-LLM Engine** performs hardware-accelerated dequantization of Outlier-Aware INT4 weights **directly inside GPU registers (SRAM)** via custom **OpenAI Triton GEMM Kernels**, compresses vocabulary embeddings (`embed_tokens`) and the classifier (`lm_head`), and employs predictive **Query-Guided Sparse Offloading**.
 
 ---
 
-## 📊 Бенчмарк Производительности (RTX 5060 Ti 16GB)
+## 📊 Performance Benchmark (RTX 5060 Ti 16GB)
 
-Тестирование проводилось на видеокарте **NVIDIA GeForce RTX 5060 Ti**:
+Benchmarking conducted on an **NVIDIA GeForce RTX 5060 Ti** GPU:
 
-| Модель / Архитектура | Формат | Статичный VRAM | Пиковый VRAM | Скорость | Время Загрузки | Паритет Интеллекта | Статус |
+| Model / Architecture | Format | Static VRAM | Peak VRAM | Speed | Load Time | Intelligence Parity | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Qwen2.5-3B (Base)** | FP16 | 5.75 ГБ | 5.81 ГБ | 25.6 т/с | ~15.0 сек | 100% (База) | База |
-| **Qwen2.5-3B (OTF Champion)** | **INT4/8** | **1.94 ГБ** | **1.99 - 2.06 ГБ** | **16.15 т/с** | **4.2 сек** | **100% (0% Потерь)** | 🏆 **ЧЕМПИОН (-66.1%)** |
-| **Qwen2.5-7B (Base)** | FP16 | 15.27 ГБ | 15.80 ГБ | 14.2 т/с | ~28.0 сек | 100% (База) | База |
-| **Qwen2.5-7B (OTF Champion)** | **INT4/8** | **4.20 ГБ** | **4.25 ГБ** | **8.60 т/с** | **15.5 сек** | **100% (0% Потерь)** | 🏆 **ЧЕМПИОН (-72.5%)** |
+| **Qwen2.5-3B (Base)** | FP16 | 5.75 GB | 5.81 GB | 25.6 t/s | ~15.0 s | 100% (Baseline) | Baseline |
+| **Qwen2.5-3B (OTF Champion)** | **INT4/8** | **1.94 GB** | **1.99 - 2.06 GB** | **16.15 t/s** | **4.2 s** | **100% (0% Loss)** | 🏆 **CHAMPION (-66.1%)** |
+| **Qwen2.5-7B (Base)** | FP16 | 15.27 GB | 15.80 GB | 14.2 t/s | ~28.0 s | 100% (Baseline) | Baseline |
+| **Qwen2.5-7B (OTF Champion)** | **INT4/8** | **4.20 GB** | **4.25 GB** | **8.60 t/s** | **15.5 s** | **100% (0% Loss)** | 🏆 **CHAMPION (-72.5%)** |
 
 ---
 
-## 🧠 Сравнительный Бенчмарк Интеллекта (A/B Test Suite)
+## 🧠 Comparative Intelligence Benchmark (A/B Test Suite)
 
-Прямое A/B-тестирование на сложных наборах многошаговой логики, написания кода Python и текстовых ограничений подтверждает **0% деградации качества**:
+Direct A/B testing across multi-step logic reasoning, Python code generation, and constraint-based text formatting confirms **0% quality degradation**:
 
-| Тест / Задача | Результат OTF Triton Engine | Результат Base FP16 | Сохранение Качества |
+| Test / Task | OTF Triton Engine Result | Base FP16 Result | Quality Retention |
 | :--- | :---: | :---: | :---: |
-| **1. Многошаговая пространственная логика** | Идентичные шаги перемещения | Идентичные шаги перемещения | **100% Паритет** 🧠 |
-| **2. Строгие ограничения (Без буквы "о")** | Идеальное соблюдение правила | Соблюдение правила | **100% Паритет** 🎯 |
-| **3. Генерация Python RLE Кода O(N)** | Точный алгоритм + Unit-тесты | Точный алгоритм + Unit-тесты | **100% Паритет** 💻 |
-| **4. Загадки поверхностного мышления** | Распознана структура ловушки | Распознана структура ловушки | **100% Паритет** 🔍 |
+| **1. Multi-step spatial reasoning** | Identical execution steps | Identical execution steps | **100% Parity** 🧠 |
+| **2. Strict constraints (No letter "o")** | Flawless rule adherence | Rule adherence | **100% Parity** 🎯 |
+| **3. Python RLE O(N) code generation** | Exact algorithm + Unit tests | Exact algorithm + Unit tests | **100% Parity** 💻 |
+| **4. Shallow reasoning riddles** | Trick structure recognized | Trick structure recognized | **100% Parity** 🔍 |
 
 ---
 
-## 🏛️ Архитектура и Ключевые Инновации
+## 🏛️ Architecture & Key Innovations
 
 ```
-[Входной Вектор X] ──► [Global Static Permutation (global_perm_idx)]
-                                    │
-         ┌──────────────────────────┴──────────────────────────┐
-         ▼                                                     ▼
-[Аномальные Каналы (1% FP16)]                 [Фоновый Блок (99% INT4)]
-   │                                                           │
-   ├──► Чистый FP16                                            ├──► Диапазон [-7 ... +7]
-   └──► Вход X_outliers                                        ├──► Упаковка 2:1 (uint8)
-                                                               └──► Zero-Point = 0 БАЙТ!
-                                                                       │
-                                                                       ▼
-                                                        [Custom Fused Triton GEMM Kernel]
-                                                        (Распаковка в регистрах GPU SRAM)
-                                                                       │
-         ┌─────────────────────────────────────────────────────────────┘
+[Input Vector X] ──► [Global Static Permutation (global_perm_idx)]
+                                   │
+         ┌─────────────────────────┴─────────────────────────┐
+         ▼                                                   ▼
+[Outlier Channels (1% FP16)]                 [Background Block (99% INT4)]
+   │                                                         │
+   ├──► Pure FP16                                            ├──► Range [-7 ... +7]
+   └──► Input X_outliers                                     ├──► 2:1 Packing (uint8)
+                                                             └──► Zero-Point = 0 BYTES!
+                                                                     │
+                                                                     ▼
+                                                      [Custom Fused Triton GEMM Kernel]
+                                                      (Dequantization in GPU SRAM Registers)
+                                                                     │
+         ┌───────────────────────────────────────────────────────────┘
          ▼
-[Непрерывное сложение GEMM: Outliers + Triton Background = Точный Ответ FP16]
+[Continuous GEMM Addition: Outliers + Triton Background = Exact FP16 Output]
 ```
 
 1. **Custom Outlier-Aware Fused Triton GEMM Kernel (`otf_triton_kernel.py`):**
-   Упакованные `uint8` веса считываются из VRAM и деквантуются **прямиком в регистрах чипа GPU (SRAM)** во время матричного умножения. Это исключает выделение временных FP16 тензоров в памяти VRAM.
+   Packed `uint8` weights are streamed from VRAM and dequantized **directly inside GPU chip registers (SRAM)** during matrix multiplication, eliminating temporary FP16 tensor allocations in VRAM.
 2. **Global Static Permutation (`global_perm_idx`) & Outlier Preservation:**
-   Единая таблица перестановки каналов на всю модель (всего 1.6 МБ VRAM). Выделение Топ-1% критических аномальных каналов ($|W| \times |X_{\text{profile}}|$) в FP16 полностью блокирует квантовый шум и сохраняет 100% точности.
+   A unified channel permutation table across the entire model (requiring only 1.6 MB VRAM). Isolating the Top-1% critical outlier channels ($|W| \times |X_{\text{profile}}|$) in FP16 completely suppresses quantization noise and guarantees 100% accuracy retention.
 3. **INT8 Quantized Embeddings & Outlier-Aware INT4 `lm_head`:**
-   Входной словарь сжат в INT8, а гигантский классификатор `lm_head` ($152\,064 \times 3584$) сжат из 1.09 ГБ до 280 МБ.
+   The vocabulary input table is compressed to INT8, while the massive `lm_head` classifier ($152\,064 \times 3584$) is compressed from 1.09 GB down to 280 MB.
 4. **Query-Guided Sparse Offload & Text-Stitching:**
-   Документы выносятся в системную ОЗУ (CPU RAM, 0 МБ VRAM). За 0.07 сек предиктивный косинусный фильтр с весами TF-IDF отбирает наиболее релевантные текстовые блоки и подгружает их в GPU.
+   Documents are offloaded to system RAM (CPU RAM, 0 MB VRAM). In just 0.07s, a predictive cosine filter with TF-IDF weighting retrieves the most relevant text blocks and streams them to the GPU.
 5. **FastAPI REST API Server (`server_fastapi.py`):**
-   Асинхронный продуктовый сервер с поддержкой спецификации **OpenAI API (`/v1/chat/completions`)**, SSE (Server-Sent Events) стримингом токенов и асинхронным очередизатором для защиты VRAM от переполнения.
+   An asynchronous production server featuring **OpenAI API specification compatibility (`/v1/chat/completions`)**, SSE (Server-Sent Events) token streaming, and an async request queue manager to protect VRAM from overflow.
 
 ---
 
-## 📁 Структура Репозитория
+## 📁 Repository Structure
 
 ```
 otf-llm-engine/
-├── make_profile_universal.py                 # Универсальный калибратор профиля активаций
-├── convert_global_universal.py               # Универсальный послойный квантователь в Safetensors
-├── run_triton_universal.py                   # Универсальный Triton GEMM инференс-раннер
-├── otf_triton_kernel.py                      # Кастомное Fused Triton INT4 GEMM ядро
-├── pipeline_run.py                           # Автоматический сквозной пайплайн в 1 клик
-├── server_fastapi.py                         # Продуктовый REST API сервер (OpenAI API + SSE)
-├── test_client.py                            # Потоковый клиент для проверки SSE-стриминга
-├── query_guided_sparse_kv.py                 # Предиктивный вызов контекста (CPU RAM -> GPU)
-├── otf_context_compressor.py                 # SnapKV / KIVI модуль сжатия кэша
-├── benchmark_profiler.py                     # Побайтовый профилировщик весов и VRAM
-├── test_intelligence_suite.py                # Бенчмарк интеллекта и логики
-├── test_base_model_suite.py                  # A/B бенчмарк базовой FP16 модели
-├── qwen2.5_7b_instruct_act_profile.pt        # Калибровочный профиль (~2.3 МБ)
-├── otf_qwen2.5_7b_instruct_compressed.safetensors # Сжатый чекпоинт (~4.18 ГБ)
-├── README.md                                 # Главная документация проекта
-└── LICENSE                                   # Лицензия MIT
+├── make_profile_universal.py                 # Universal activation profile calibrator
+├── convert_global_universal.py               # Universal layer-wise safetensors quantizer
+├── run_triton_universal.py                   # Universal Triton GEMM inference runner
+├── otf_triton_kernel.py                      # Custom Fused Triton INT4 GEMM kernel
+├── pipeline_run.py                           # Automated 1-click end-to-end pipeline
+├── server_fastapi.py                         # Production REST API server (OpenAI API + SSE)
+├── test_client.py                            # Streaming client for SSE validation
+├── query_guided_sparse_kv.py                 # Predictive context retrieval (CPU RAM -> GPU)
+├── otf_context_compressor.py                 # SnapKV / KIVI cache compression module
+├── benchmark_profiler.py                     # Byte-level weights and VRAM profiler
+├── test_intelligence_suite.py                # Intelligence and reasoning benchmark suite
+├── test_base_model_suite.py                  # Baseline FP16 model A/B benchmark
+├── qwen2.5_7b_instruct_act_profile.pt        # Calibration profile (~2.3 MB)
+├── otf_qwen2.5_7b_instruct_compressed.safetensors # Compressed checkpoint (~4.18 GB)
+├── README.md                                 # Project documentation
+└── LICENSE                                   # MIT License
 ```
 
 ---
 
-## 🛠️ Быстрый Запуск (Универсальный Пайплайн)
+## 🛠️ Quickstart (Universal Pipeline)
 
-### 1. Автоматический запуск в 1 команду (Профиль ➔ Сжатие ➔ Инференс)
+### 1. Automated 1-Command Execution (Profile ➔ Compress ➔ Inference)
 
-Для сжатия и проверки любой модели (Qwen, Llama, Mistral) запустите сквозной пайплайн:
+To quantize and evaluate any supported model (Qwen, Llama, Mistral), execute the end-to-end pipeline:
 
 ```bash
 python pipeline_run.py --model_id Qwen/Qwen2.5-7B-Instruct
 ```
 
-### 2. Запуск готового Triton Engine (3.7 сек старт, 4.20 ГБ VRAM, 0 МБ FP16 в ОЗУ)
+### 2. Launch Pre-compressed Triton Engine (3.7s start, 4.20 GB VRAM, 0 MB FP16 in RAM)
 
 ```bash
 python run_triton_universal.py --model_id Qwen/Qwen2.5-7B-Instruct
 ```
 
-### 3. Запуск REST API Сервера для VS Code / Веб-клиентов
+### 3. Launch REST API Server for VS Code / Web Clients
 
 ```bash
 python server_fastapi.py
 ```
-*Эндпоинт генерации: `http://localhost:8000/v1/chat/completions` (OpenAI spec).*
+*Inference endpoint: `http://localhost:8000/v1/chat/completions` (OpenAI spec).*
 
 ---
 
-## 🚫 Опровергнутые Гипотезы (Strict Disproved Paths)
+## 🚫 Disproved Hypotheses (Strict Disproved Paths)
 
-1. **❌ Чистый PRNG шум / SVD / 2D DCT синтез 99% весов:** Разрушают векторное пространство (`lifylify...`).
-2. **❌ 3-Tier с `torch.bool` масками:** Динамические маски раздувают VRAM на +340 МБ и замедляют инференс до 2.6 т/с.
-3. **❌ Cross-Layer Background Sharing:** Усреднение фона ломает индивидуальные повороты слоев (`the the...`).
-4. **❌ Безобучаемый SVD-синтез весов $\Delta W$ из KV-кэша:** Требует 10 минут вычислений на CPU и приводит к коллапсу логитов (`!!!!!!`).
-5. **❌ Weight-Only отбор аномалий без $|X|$:** Приводит к зацикливанию текста (`korotak korotak...`).
-
----
-
-## 🗺️ Выполненная Дорожная Карта (Roadmap)
-
-- [x] Разработка Fused Triton INT4 GEMM ядра для деквантования в регистрах GPU SRAM.
-- [x] Перевод таблицы слов `embed_tokens` в INT8.
-- [x] Единый глобальный трафарет перестановок `global_perm_idx`.
-- [x] Квантование слоя `lm_head` в Outlier-Aware INT4.
-- [x] Query-Guided Sparse Offloading с предиктивным отбором контекста за 0.07 сек.
-- [x] Масштабирование движка на модели **Qwen2.5-7B** и **Llama-3.1-8B** (**4.20 ГБ VRAM**).
-- [x] Продуктовый REST API сервер (FastAPI) с поддержкой OpenAI API и SSE-стриминга.
+1. **❌ Pure PRNG Noise / SVD / 2D DCT Synthesis of 99% Weights:** Destroys vector space geometry (`lifylify...`).
+2. **❌ 3-Tier Architecture with `torch.bool` Masks:** Dynamic masks bloat VRAM by +340 MB and degrade inference speed to 2.6 t/s.
+3. **❌ Cross-Layer Background Sharing:** Background averaging breaks layer-specific rotations (`the the...`).
+4. **❌ Training-Free SVD Synthesis of $\Delta W$ Weights from KV Cache:** Requires 10 minutes of CPU compute and causes logit collapse (`!!!!!!`).
+5. **❌ Weight-Only Outlier Selection without $|X|$:** Triggers text looping (`korotak korotak...`).
 
 ---
 
-## 📜 Лицензия
+## 🗺️ Completed Roadmap
 
-Проект распространяется под свободной лицензией **MIT**. Подробности в файле [LICENSE](LICENSE).
+- [x] Engineered custom Fused Triton INT4 GEMM kernel for GPU SRAM register dequantization.
+- [x] Converted vocabulary lookup table `embed_tokens` to INT8.
+- [x] Implemented unified global permutation mask `global_perm_idx`.
+- [x] Quantized classifier layer `lm_head` into Outlier-Aware INT4.
+- [x] Integrated Query-Guided Sparse Offloading with 0.07s predictive context retrieval.
+- [x] Scaled engine to **Qwen2.5-7B** and **Llama-3.1-8B** (**4.20 GB VRAM**).
+- [x] Built production FastAPI REST API server supporting OpenAI API spec & SSE streaming.
+
+---
+
+## 📜 License
+
+Distributed under the MIT License. See [LICENSE](LICENSE) for details.
