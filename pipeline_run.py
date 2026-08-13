@@ -1,8 +1,8 @@
 # pipeline_run.py
 import gc, torch, argparse
-from make_profile_universal import create_act_profile
-from convert_global_universal import convert_model
-from run_triton_universal import run_inference
+from otf_llm.make_profile_universal import create_act_profile
+from otf_llm.convert_global_universal import convert_model
+from otf_llm.run_triton_universal import run_inference
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Единый пайплайн OTF-LLM Engine")

@@ -16,8 +16,8 @@ try:
 except ImportError:
     HAS_SAFETENSORS = False
 
-from convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear
-from otf_triton_kernel import triton_fused_int4_linear
+from .convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear
+from .otf_triton_kernel import triton_fused_int4_linear
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -4,6 +4,10 @@ venv/
 env/
 ENV/
 
+build/
+dist/
+*.egg-info/
+
 # Кэш Python и компилированные файлы
 __pycache__/
 *.py[cod]

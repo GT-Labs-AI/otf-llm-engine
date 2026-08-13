@@ -1,23 +1,58 @@
-import os, time, torch
-import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from convert_global import GlobalSymmetricINT4Linear, QuantizedEmbedding, MODEL_ID, SAVE_PATH
-from run_triton import TritonGlobalSymmetricLinear
+# OTF-LLM Engine (On-The-Fly Weight Synthesizer)
+# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
+# Distributed under the terms of the MIT License.
 
+import os
+import time
+import gc
+import torch
+import torch.nn as nn
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+try:
+    from safetensors.torch import load_file as safe_load_file
+    HAS_SAFETENSORS = True
+except ImportError:
+    HAS_SAFETENSORS = False
+
+from otf_llm.convert_global_universal import QuantizedEmbedding
+from otf_llm.run_triton_universal import TritonGlobalSymmetricLinear
+
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def profile_weights_breakdown(model, state_dict_path):
+def fix_rope_position_embeddings(model, config):
+    for m in model.modules():
+        if hasattr(m, "inv_freq"):
+            dim = m.inv_freq.shape[0] * 2 if m.inv_freq.numel() > 0 else (config.hidden_size // config.num_attention_heads)
+            base = getattr(m, "base", getattr(config, "rope_theta", 1000000.0)) or 1000000.0
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu") / dim))
+            m.inv_freq = inv_freq.to(dtype=torch.float32)
+
+
+def profile_weights_breakdown(state_dict_path):
     print("=" * 65)
-    print("📊 ПОБАЙТОВЫЙ РАЗБОР ВЕСОВ И МЕТАДАННЫХ МОДЕЛИ")
+    print(f"📊 ПОБАЙТОВЫЙ РАЗБОР ВЕСОВ И МЕТАДАННЫХ: {os.path.basename(state_dict_path)}")
     print("=" * 65)
 
+    if not os.path.exists(state_dict_path):
+        print(f"❌ Файл {state_dict_path} не найден!")
+        return
+
     file_size_mb = os.path.getsize(state_dict_path) / (1024 ** 2)
-    state_dict = torch.load(state_dict_path, map_location="cpu")
+
+    if state_dict_path.endswith(".safetensors") and HAS_SAFETENSORS:
+        state_dict = safe_load_file(state_dict_path)
+    else:
+        state_dict = torch.load(state_dict_path, map_location="cpu")
 
     bytes_breakdown = {
         "Embeddings (INT8)": 0,
-        "LM_Head (FP16)": 0,
+        "LM_Head (INT4 / FP16)": 0,
         "INT4 Quantized Background": 0,
         "FP16 Outliers (1% Brain)": 0,
         "Scales (scale_bg / scale)": 0,
@@ -29,10 +64,10 @@ def profile_weights_breakdown(model, state_dict_path):
     for key, tensor in state_dict.items():
         size_bytes = tensor.numel() * tensor.element_size()
 
-        if "embed_tokens" in key and "packed_q" in key:
+        if "embed_tokens" in key:
             bytes_breakdown["Embeddings (INT8)"] += size_bytes
         elif "lm_head" in key:
-            bytes_breakdown["LM_Head (FP16)"] += size_bytes
+            bytes_breakdown["LM_Head (INT4 / FP16)"] += size_bytes
         elif "packed_q_bg" in key:
             bytes_breakdown["INT4 Quantized Background"] += size_bytes
         elif "W_outliers_fp16" in key:
@@ -46,7 +81,7 @@ def profile_weights_breakdown(model, state_dict_path):
         else:
             bytes_breakdown["Other Metadata"] += size_bytes
 
-    print(f"📁 Общий размер файла на диске: {file_size_mb:.2f} МБ\n")
+    print(f"📁 Общий размер файла на диске: {file_size_mb:.2f} МБ ({file_size_mb / 1024:.2f} ГБ)\n")
 
     total_bytes = sum(bytes_breakdown.values())
     for category, b_size in bytes_breakdown.items():
@@ -95,15 +130,39 @@ def run_single_task_benchmark(model, tokenizer, task_name, prompt, max_tokens=12
 
 
 if __name__ == "__main__":
-    profile_weights_breakdown(None, SAVE_PATH)
+    clean_name = MODEL_ID.split("/")[-1].lower().replace("-", "_")
+    save_path_safetensors = f"otf_{clean_name}_compressed.safetensors"
+    save_path_pt = f"otf_{clean_name}_compressed.pt"
+
+    if os.path.exists(save_path_safetensors) and HAS_SAFETENSORS:
+        save_path = save_path_safetensors
+        is_safetensors = True
+    elif os.path.exists(save_path_pt):
+        save_path = save_path_pt
+        is_safetensors = False
+    else:
+        raise FileNotFoundError(f"Сжатый чекпоинт для {MODEL_ID} не найден!")
+
+    profile_weights_breakdown(save_path)
 
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.float16, device_map="cpu")
+    config = AutoConfig.from_pretrained(MODEL_ID)
+
+    # 0 МБ тяжелых весов в системном ОЗУ!
+    with torch.device("meta"):
+        raw_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
+
+    model = raw_model.to_empty(device="cpu")
+    fix_rope_position_embeddings(model, config)
 
     # Подмена ТОЛЬКО Входных Эмбеддингов
-    model.model.embed_tokens = QuantizedEmbedding(model.model.embed_tokens.num_embeddings,
-                                                  model.model.embed_tokens.embedding_dim)
+    old_emb = model.model.embed_tokens
+    model.model.embed_tokens = QuantizedEmbedding(
+        old_emb.num_embeddings,
+        old_emb.embedding_dim,
+        original_emb=None
+    )
 
     # Подмена Слоев на Triton Engine
     for name, module in model.named_modules():
@@ -113,16 +172,29 @@ if __name__ == "__main__":
                     new_linear = TritonGlobalSymmetricLinear(
                         in_features=child_module.in_features,
                         out_features=child_module.out_features,
-                        bias=(child_module.bias is not None),
-                        original_linear=None
+                        bias=(child_module.bias is not None)
                     )
                     setattr(module, child_name, new_linear)
 
-    state_dict = torch.load(SAVE_PATH, map_location="cpu")
+    if hasattr(model, "lm_head") and isinstance(model.lm_head, nn.Linear):
+        model.lm_head = TritonGlobalSymmetricLinear(
+            in_features=model.lm_head.in_features,
+            out_features=model.lm_head.out_features,
+            bias=(model.lm_head.bias is not None)
+        )
+
+    if is_safetensors:
+        state_dict = safe_load_file(save_path)
+    else:
+        state_dict = torch.load(save_path, map_location="cpu")
 
     # Загрузка INT8 Эмбеддингов
-    model.model.embed_tokens.packed_q = state_dict.pop("model.embed_tokens.packed_q")
-    model.model.embed_tokens.scale = state_dict.pop("model.embed_tokens.scale")
+    for emb_key in ["model.embed_tokens.packed_q", "embed_tokens.packed_q"]:
+        if emb_key in state_dict:
+            model.model.embed_tokens.packed_q = state_dict.pop(emb_key)
+            scale_key = emb_key.replace("packed_q", "scale")
+            model.model.embed_tokens.scale = state_dict.pop(scale_key)
+            break
 
     # Загрузка Трансформерных Слоев
     for name, module in model.named_modules():
@@ -139,6 +211,9 @@ if __name__ == "__main__":
 
     model.load_state_dict(state_dict, strict=False)
     model.to(device)
+
+    del state_dict
+    gc.collect()
     torch.cuda.empty_cache()
 
     vram_init = torch.cuda.memory_allocated() / (1024 ** 2)

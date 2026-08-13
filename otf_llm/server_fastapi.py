@@ -28,8 +28,8 @@ try:
 except ImportError:
     HAS_SAFETENSORS = False
 
-from convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear
-from otf_triton_kernel import triton_fused_int4_linear
+from .convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear
+from .otf_triton_kernel import triton_fused_int4_linear
 
 MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 device = "cuda" if torch.cuda.is_available() else "cpu"

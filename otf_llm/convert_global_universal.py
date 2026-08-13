@@ -1,14 +1,19 @@
 # OTF-LLM Engine (On-The-Fly Weight Synthesizer)
-# Copyright (c) 2026 GT Labs AI & GlebTikhiy <team.gtlabs@gmail.com>
+# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
 # Distributed under the terms of the MIT License.
-# convert_global_universal.py
-import os, argparse, time, math, gc, torch
+# otf_llm/convert_global_universal.py
+
+import os
+import argparse
+import time
+import math
+import gc
+import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 try:
     from safetensors.torch import save_file as safe_save_file
-
     HAS_SAFETENSORS = True
 except ImportError:
     HAS_SAFETENSORS = False
@@ -72,7 +77,6 @@ class GlobalSymmetricINT4Linear(nn.Module):
         if linear_module.bias is not None:
             self.bias = nn.Parameter(linear_module.bias.data.half().cpu())
 
-        # КЛОНИРУЕМ ТЕНЗОР, чтобы убрать ошибку shared memory в Safetensors
         self.perm_idx = global_perm_idx.clone().int().cpu()
 
         W_permuted = W[:, global_perm_idx.to(device).long()]
@@ -110,26 +114,26 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
         save_path = f"otf_{clean_name}_compressed.pt"
 
     if not os.path.exists(profile_path):
-        raise FileNotFoundError(f"Файл профиля {profile_path} не найден!")
+        raise FileNotFoundError(f"Profile file {profile_path} not found!")
 
     t0 = time.time()
     print("=" * 70)
-    print(f"📦 УНИВЕРСАЛЬНОЕ ПОСЛОЙНОЕ СЖАТИЕ МОДЕЛИ: {model_id}")
-    print(f"🎯 Выделение аномалий: {outlier_pct * 100}% FP16 | Чекпоинт: {save_path}")
+    print(f"📦 LAYER-WISE MODEL COMPRESSION: {model_id}")
+    print(f"🎯 Outlier Retention: {outlier_pct * 100}% FP16 | Checkpoint: {save_path}")
     print("=" * 70)
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     act_profile = torch.load(profile_path, map_location="cpu")
 
-    print("[1/3] Загрузка базового каркаса модели в ОЗУ...")
+    print("[1/3] Loading base model skeleton into CPU RAM (FP32 Windows-Safe mode)...")
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        dtype=torch.float16,
+        torch_dtype=torch.float32,  # <--- Fixes Windows 0xC0000005 crash!
         device_map="cpu",
         low_cpu_mem_usage=True
     )
 
-    print("[2/3] Быстрый расчет карт важных перестановок...")
+    print("[2/3] Calculating global permutation maps...")
     global_importance_by_dim = {}
 
     for name, module in model.named_modules():
@@ -150,7 +154,8 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
         raw_k = int(dim * outlier_pct)
         num_k = math.ceil(raw_k / group_size) * group_size
         num_k = min(num_k, dim - group_size)
-        if num_k == 0: num_k = group_size
+        if num_k == 0:
+            num_k = group_size
 
         perm_idx = torch.argsort(importance, descending=True).int().cpu()
         global_perm_map[dim] = perm_idx
@@ -159,14 +164,14 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
     del global_importance_by_dim
     gc.collect()
 
-    print("[3/3] Послойное сжатие весов (Layer-by-Layer Direct)...")
+    print("[3/3] Compressing weight tensors layer-by-layer...")
 
     # Embeddings -> INT8
     old_emb = model.model.embed_tokens
     new_emb = QuantizedEmbedding(old_emb.num_embeddings, old_emb.embedding_dim, original_emb=old_emb)
     model.model.embed_tokens = new_emb
 
-    # Layers -> INT4
+    # Transformer Layers -> INT4
     for name, module in model.named_modules():
         if "mlp" in name or "self_attn" in name:
             for child_name, child_module in module.named_children():
@@ -193,20 +198,20 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
 
     gc.collect()
 
-    print(f"💾 Сохранение сжатого чекпоинта в: {save_path}...")
+    print(f"💾 Saving compressed safetensors checkpoint to: {save_path}...")
     if HAS_SAFETENSORS:
         safe_save_file(model.state_dict(), save_path)
     else:
         torch.save(model.state_dict(), save_path, _use_new_zipfile_serialization=False)
 
     file_size_gb = os.path.getsize(save_path) / (1024 ** 3)
-    print(f"⚡ ГОТОВО! Модель сжата до {file_size_gb:.2f} ГБ за {time.time() - t0:.2f} сек!\n")
+    print(f"⚡ SUCCESS! Model compressed to {file_size_gb:.2f} GB in {time.time() - t0:.2f} sec!\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Универсальный сжиматель LLM")
-    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Имя модели")
-    parser.add_argument("--device", type=str, default="cpu", help="cpu или cuda")
+    parser = argparse.ArgumentParser(description="Universal LLM Quantizer")
+    parser.add_argument("--model_id", type=str, default="unsloth/Llama-3.2-3B-Instruct", help="Model ID")
+    parser.add_argument("--device", type=str, default="cpu", help="cpu or cuda")
     args = parser.parse_args()
 
     convert_model(args.model_id, device=args.device)

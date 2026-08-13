@@ -1,12 +1,27 @@
+# OTF-LLM Engine (On-The-Fly Weight Synthesizer)
+# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
+# Distributed under the terms of the MIT License.
+
 import os
 import time
+import gc
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from convert_global import QuantizedEmbedding, GlobalSymmetricINT4Linear, MODEL_ID, SAVE_PATH
-from otf_triton_kernel import triton_fused_int4_linear
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_XET"] = "1"
 
+try:
+    from safetensors.torch import load_file as safe_load_file
+    HAS_SAFETENSORS = True
+except ImportError:
+    HAS_SAFETENSORS = False
+
+from otf_llm.convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear
+from otf_llm.otf_triton_kernel import triton_fused_int4_linear
+
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -33,6 +48,15 @@ class TritonGlobalSymmetricLinear(GlobalSymmetricINT4Linear):
             out = out + self.bias.to(dtype)
 
         return out
+
+
+def fix_rope_position_embeddings(model, config):
+    for m in model.modules():
+        if hasattr(m, "inv_freq"):
+            dim = m.inv_freq.shape[0] * 2 if m.inv_freq.numel() > 0 else (config.hidden_size // config.num_attention_heads)
+            base = getattr(m, "base", getattr(config, "rope_theta", 1000000.0)) or 1000000.0
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cpu") / dim))
+            m.inv_freq = inv_freq.to(dtype=torch.float32)
 
 
 def run_benchmark_test(model, tokenizer, test_id, test_name, prompt, max_tokens=250):
@@ -82,9 +106,14 @@ def run_benchmark_test(model, tokenizer, test_id, test_name, prompt, max_tokens=
 if __name__ == "__main__":
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.float16, device_map="cpu")
+    config = AutoConfig.from_pretrained(MODEL_ID)
 
-    model.config.rope_theta = 1000000.0
+    # 0 МБ тяжелых весов в ОЗУ!
+    with torch.device("meta"):
+        raw_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
+
+    model = raw_model.to_empty(device="cpu")
+    fix_rope_position_embeddings(model, config)
 
     # 1. Замена Входных Эмбеддингов
     old_emb = model.model.embed_tokens
@@ -98,8 +127,7 @@ if __name__ == "__main__":
                     new_linear = TritonGlobalSymmetricLinear(
                         in_features=child_module.in_features,
                         out_features=child_module.out_features,
-                        bias=(child_module.bias is not None),
-                        original_linear=None
+                        bias=(child_module.bias is not None)
                     )
                     setattr(module, child_name, new_linear)
 
@@ -108,11 +136,27 @@ if __name__ == "__main__":
         model.lm_head = TritonGlobalSymmetricLinear(
             in_features=model.lm_head.in_features,
             out_features=model.lm_head.out_features,
-            bias=(model.lm_head.bias is not None),
-            original_linear=None
+            bias=(model.lm_head.bias is not None)
         )
 
-    state_dict = torch.load(SAVE_PATH, map_location="cpu")
+    clean_name = MODEL_ID.split("/")[-1].lower().replace("-", "_")
+    save_path_safetensors = f"otf_{clean_name}_compressed.safetensors"
+    save_path_pt = f"otf_{clean_name}_compressed.pt"
+
+    if os.path.exists(save_path_safetensors) and HAS_SAFETENSORS:
+        save_path = save_path_safetensors
+        is_safetensors = True
+    elif os.path.exists(save_path_pt):
+        save_path = save_path_pt
+        is_safetensors = False
+    else:
+        raise FileNotFoundError(f"Сжатый чекпоинт для {MODEL_ID} не найден!")
+
+    print(f"📥 Загрузка сжатого чекпоинта {save_path}...")
+    if is_safetensors:
+        state_dict = safe_load_file(save_path)
+    else:
+        state_dict = torch.load(save_path, map_location="cpu")
 
     for emb_key in ["model.embed_tokens.packed_q", "embed_tokens.packed_q"]:
         if emb_key in state_dict:
@@ -135,6 +179,9 @@ if __name__ == "__main__":
 
     model.load_state_dict(state_dict, strict=False)
     model.to(device)
+
+    del state_dict
+    gc.collect()
     torch.cuda.empty_cache()
 
     vram_stat = torch.cuda.memory_allocated() / (1024 ** 2)
