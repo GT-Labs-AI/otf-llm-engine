@@ -1,8 +1,14 @@
 # OTF-LLM Engine (On-The-Fly Weight Synthesizer)
-# Copyright (c) 2026 GT Labs AI & GlebTikhiy <team.gtlabs@gmail.com>
+# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
 # Distributed under the terms of the MIT License.
-# run_triton_universal.py
-import os, time, gc, argparse, traceback, torch
+# otf_llm/run_triton_universal.py
+
+import os
+import time
+import gc
+import argparse
+import traceback
+import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -11,7 +17,6 @@ os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 try:
     from safetensors.torch import load_file as safe_load_file
-
     HAS_SAFETENSORS = True
 except ImportError:
     HAS_SAFETENSORS = False
@@ -52,7 +57,8 @@ def fix_rope_position_embeddings(model, config):
     for m in model.modules():
         if hasattr(m, "inv_freq"):
             dim = m.inv_freq.shape[0] * 2 if m.inv_freq.numel() > 0 else (
-                        config.hidden_size // config.num_attention_heads)
+                config.hidden_size // config.num_attention_heads
+            )
             base = getattr(m, "base", getattr(config, "rope_theta", 1000000.0))
             if base is None:
                 base = 1000000.0
@@ -88,6 +94,9 @@ def run_inference(model_id: str, prompt: str = None):
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         config = AutoConfig.from_pretrained(model_id)
+
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
         # МГНОВЕННОЕ СОЗДАНИЕ ПУСТОГО СКЕЛЕТА СЕТИ (0 МБ ВЕСОВ В ОЗУ!)
         with torch.device("meta"):
@@ -149,6 +158,11 @@ def run_inference(model_id: str, prompt: str = None):
                         module.bias = nn.Parameter(state_dict.pop(f"{prefix}bias"))
                     module.is_calibrated = True
 
+        # СВЯЗЫВАНИЕ TIED EMBEDDINGS ДЛЯ МОДЕЛЕЙ ТИПА LLAMA-3.2
+        if hasattr(model, "lm_head") and isinstance(model.lm_head, TritonGlobalSymmetricLinear):
+            if not model.lm_head.is_calibrated:
+                model.lm_head.tied_embedding = model.model.embed_tokens
+
         model.load_state_dict(state_dict, strict=False)
         model.to(device)
 
@@ -170,7 +184,12 @@ def run_inference(model_id: str, prompt: str = None):
         torch.cuda.reset_peak_memory_stats()
         t_gen_start = time.time()
         with torch.no_grad():
-            tokens = model.generate(**inputs, max_new_tokens=150, do_sample=False)
+            tokens = model.generate(
+                **inputs,
+                max_new_tokens=150,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id
+            )
         t_gen_end = time.time()
 
         vram_peak = torch.cuda.max_memory_allocated() / (1024 ** 2)
