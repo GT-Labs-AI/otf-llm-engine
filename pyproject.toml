@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "otf-llm"
-version = "2.0.4"
+version = "2.1.1"
 authors = [
     { name = "Gleb Tikhiy", email = "team.gtlabs@gmail.com" },
     { name = "GT Labs AI", email = "team.gtlabs@gmail.com" }

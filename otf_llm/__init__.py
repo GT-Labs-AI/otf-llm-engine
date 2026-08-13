@@ -5,10 +5,10 @@
 """
 OTF-LLM Engine Package
 ======================
-High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels.
+High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels and MoE Expert Offloader.
 """
 
-__version__ = "2.0.4"
+__version__ = "2.1.1"
 __author__ = "GT Labs AI & Gleb Tikhiy"
 __email__ = "team.gtlabs@gmail.com"
 
@@ -17,6 +17,7 @@ from .make_profile_universal import create_act_profile
 from .otf_triton_kernel import triton_fused_int4_linear
 from .run_triton_universal import TritonGlobalSymmetricLinear, run_inference
 from .companion_memory import CompanionMemoryManager
+from .otf_moe_offloader import MoEExpertLRUCache, AsynchronousExpertStreamer, OTFSparseMoeBlockWrapper
 
 __all__ = [
     "QuantizedEmbedding",
@@ -27,4 +28,7 @@ __all__ = [
     "convert_model",
     "run_inference",
     "CompanionMemoryManager",
+    "MoEExpertLRUCache",
+    "AsynchronousExpertStreamer",
+    "OTFSparseMoeBlockWrapper",
 ]
