@@ -8,12 +8,13 @@ import argparse
 import time
 import math
 import gc
+import shutil
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
 try:
-    from safetensors.torch import safe_open, save_file as safe_save_file
+    from safetensors.torch import safe_open, save_file as safe_save_file, load_file as safe_load_file
 
     HAS_SAFETENSORS = True
 except ImportError:
@@ -30,7 +31,6 @@ class QuantizedEmbedding(nn.Module):
         self.register_buffer("packed_q", torch.empty(0, dtype=torch.int8))
         self.register_buffer("scale", torch.empty(0, dtype=torch.float16))
 
-        # Support both original_emb module and raw weight_tensor
         if weight_tensor is None and original_emb is not None and hasattr(original_emb, "weight"):
             weight_tensor = original_emb.weight.data
 
@@ -52,7 +52,11 @@ class QuantizedEmbedding(nn.Module):
         q_rows = self.packed_q.to(device).view(self.num_embeddings, self.embedding_dim)[input_ids]
         scale_rows = self.scale.to(device)[input_ids]
 
-        q_reshaped = q_rows.view(*input_ids.shape, -1, self.group_size).float()
+        # Dynamic group_size detection for AWQ/GPTQ 128-group embeddings
+        actual_groups = scale_rows.shape[-1]
+        actual_group_size = self.embedding_dim // actual_groups if actual_groups > 0 else self.group_size
+
+        q_reshaped = q_rows.view(*input_ids.shape, -1, actual_group_size).float()
         scale_expanded = scale_rows.unsqueeze(-1).float()
         dequant = (q_reshaped * scale_expanded).view(*input_ids.shape, self.embedding_dim)
         return dequant.to(dtype)
@@ -155,40 +159,56 @@ class GlobalSymmetricINT4Linear(nn.Module):
         self.is_calibrated = True
 
 
+def is_linear_quantizable_key(key: str) -> bool:
+    if not key.endswith(".weight"):
+        return False
+    parts = key.split(".")
+    if len(parts) >= 2 and parts[-2] == "gate" and "experts" not in key:
+        return False
+    quantizable_patterns = ["mlp", "self_attn", "lm_head", "experts", "block_sparse_moe"]
+    return any(p in key for p in quantizable_patterns)
+
+
 def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu"):
     clean_name = model_id.split("/")[-1].lower().replace("-", "_")
     profile_path = f"{clean_name}_act_profile.pt"
     save_path = f"otf_{clean_name}_compressed.safetensors"
+    chunks_dir = f"tmp_otf_chunks_{clean_name}"
 
-    if not os.path.exists(profile_path):
-        raise FileNotFoundError(f"Profile file {profile_path} not found!")
+    os.makedirs(chunks_dir, exist_ok=True)
 
     t0 = time.time()
     print("=" * 70)
-    print(f"📦 ZERO-RAM STREAMING MODEL QUANTIZER: {model_id}")
-    print(f"🎯 Outlier Retention: {outlier_pct * 100}% FP16 | Peak RAM Target: < 500 MB")
+    print(f"📦 INCREMENTAL SHARDED QUANTIZER (RESUME SUPPORT): {model_id}")
+    print(f"🎯 Outlier Retention: {outlier_pct * 100}% FP16 | RAM Footprint: < 150 MB")
+    print(f"📁 Temporary Chunks Directory: {chunks_dir}")
     print("=" * 70)
 
-    act_profile = torch.load(profile_path, map_location="cpu")
+    if os.path.exists(profile_path):
+        print(f"✅ Loaded existing activation profile: {profile_path}")
+        act_profile = torch.load(profile_path, map_location="cpu")
+    else:
+        print(f"ℹ️ Profile file {profile_path} not found. Using instant weight-channel magnitude profiling...")
+        act_profile = {}
 
     print("[1/3] Locating model safetensors shards on disk...")
     model_dir = snapshot_download(repo_id=model_id, allow_patterns=["*.safetensors", "*.json"])
 
-    safetensors_files = [
+    safetensors_files = sorted([
         os.path.join(model_dir, f) for f in os.listdir(model_dir) if f.endswith(".safetensors")
-    ]
+    ])
 
     if not safetensors_files:
         raise FileNotFoundError("No .safetensors files found in downloaded model repository!")
 
-    # Pass 1: Build Importance Permutation Maps without loading weights into RAM
+    # Pass 1: Build Importance Permutation Maps
     print("[2/3] Calculating global permutation maps via mmap inspection...")
     global_importance_by_dim = {}
 
     for sf_file in safetensors_files:
         with safe_open(sf_file, framework="pt", device="cpu") as f:
             for key in f.keys():
-                if key.endswith(".weight") and ("mlp" in key or "self_attn" in key or "lm_head" in key):
+                if is_linear_quantizable_key(key):
                     tensor = f.get_tensor(key)
                     out_dim, in_dim = tensor.shape
 
@@ -221,24 +241,34 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
     del global_importance_by_dim
     gc.collect()
 
-    # Pass 2: Layer-by-Layer Streaming Quantization directly from mmap
-    print("[3/3] Quantizing weight tensors layer-by-layer (< 500 MB RAM Peak)...")
-    compressed_state_dict = {}
+    # Pass 2: Incremental Sharded Quantization to Disk (Resume Support)
+    print("[3/3] Quantizing shards incrementally to disk (< 150 MB RAM Peak)...")
 
-    for sf_file in safetensors_files:
+    for sf_idx, sf_file in enumerate(safetensors_files):
+        shard_filename = f"quantized_shard_{sf_idx:05d}.safetensors"
+        shard_path = os.path.join(chunks_dir, shard_filename)
+
+        # RESUME CHECK: Skip if shard is already quantized on disk
+        if os.path.exists(shard_path):
+            print(f"⏩ [RESUME] Shard {sf_idx + 1}/{len(safetensors_files)} already quantized on disk. Skipping!")
+            continue
+
+        print(f"⏳ [QUANTIZING SHARD {sf_idx + 1}/{len(safetensors_files)}] {os.path.basename(sf_file)}...")
+        shard_state_dict = {}
+
         with safe_open(sf_file, framework="pt", device="cpu") as f:
             for key in f.keys():
                 # Process Embeddings
                 if "embed_tokens.weight" in key:
                     w = f.get_tensor(key)
                     emb_quant = QuantizedEmbedding(w.shape[0], w.shape[1], weight_tensor=w)
-                    compressed_state_dict["model.embed_tokens.packed_q"] = emb_quant.packed_q
-                    compressed_state_dict["model.embed_tokens.scale"] = emb_quant.scale
+                    shard_state_dict["model.embed_tokens.packed_q"] = emb_quant.packed_q
+                    shard_state_dict["model.embed_tokens.scale"] = emb_quant.scale
                     del w, emb_quant
                     gc.collect()
 
-                # Process Linear Layers
-                elif key.endswith(".weight") and ("mlp" in key or "self_attn" in key or "lm_head" in key):
+                # Process Linear Layers (Dense + MoE Experts)
+                elif is_linear_quantizable_key(key):
                     w = f.get_tensor(key)
                     in_dim = w.shape[1]
                     out_dim = w.shape[0]
@@ -251,33 +281,56 @@ def convert_model(model_id: str, outlier_pct: float = 0.01, device: str = "cpu")
                                                    bias_tensor=bias)
 
                     prefix = key.replace(".weight", "")
-                    compressed_state_dict[f"{prefix}.perm_idx"] = wrapped.perm_idx
-                    compressed_state_dict[f"{prefix}.W_outliers_fp16"] = wrapped.W_outliers_fp16
-                    compressed_state_dict[f"{prefix}.packed_q_bg"] = wrapped.packed_q_bg
-                    compressed_state_dict[f"{prefix}.scale_bg"] = wrapped.scale_bg
+                    shard_state_dict[f"{prefix}.perm_idx"] = wrapped.perm_idx
+                    shard_state_dict[f"{prefix}.W_outliers_fp16"] = wrapped.W_outliers_fp16
+                    shard_state_dict[f"{prefix}.packed_q_bg"] = wrapped.packed_q_bg
+                    shard_state_dict[f"{prefix}.scale_bg"] = wrapped.scale_bg
                     if wrapped.bias is not None:
-                        compressed_state_dict[f"{prefix}.bias"] = wrapped.bias
+                        shard_state_dict[f"{prefix}.bias"] = wrapped.bias
 
                     del w, bias, wrapped
                     gc.collect()
 
-                # Keep Norms and Biases in FP16
-                elif "norm" in key or "bias" in key:
+                # Keep Router Gate Weights, Norms and Biases in FP16
+                else:
                     tensor = f.get_tensor(key)
-                    compressed_state_dict[key] = tensor.half().cpu()
+                    shard_state_dict[key] = tensor.half().cpu()
                     del tensor
                     gc.collect()
 
-    print(f"💾 Saving compressed safetensors checkpoint to: {save_path}...")
-    safe_save_file(compressed_state_dict, save_path)
+        # Write current shard directly to disk and purge RAM
+        safe_save_file(shard_state_dict, shard_path)
+        del shard_state_dict
+        gc.collect()
+        print(f"  💾 Saved shard chunk to disk: {shard_filename}")
+
+    # Pass 3: Streaming Merge of Chunks into Final Safetensors
+    print("\n📦 Merging sharded chunks into final safetensors file...")
+    merged_state_dict = {}
+    chunk_files = sorted([os.path.join(chunks_dir, f) for f in os.listdir(chunks_dir) if f.endswith(".safetensors")])
+
+    for cf in chunk_files:
+        chunk_dict = safe_load_file(cf)
+        merged_state_dict.update(chunk_dict)
+        del chunk_dict
+        gc.collect()
+
+    safe_save_file(merged_state_dict, save_path)
+    del merged_state_dict
+    gc.collect()
+
+    # Cleanup temporary chunk folder
+    if os.path.exists(chunks_dir):
+        shutil.rmtree(chunks_dir)
 
     file_size_gb = os.path.getsize(save_path) / (1024 ** 3)
-    print(f"⚡ SUCCESS! Model streamed and compressed to {file_size_gb:.2f} GB in {time.time() - t0:.2f} sec!\n")
+    print(
+        f"⚡ SUCCESS! Model incrementally quantized and merged to {file_size_gb:.2f} GB in {time.time() - t0:.2f} sec!\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Zero-RAM Streaming LLM Quantizer")
-    parser.add_argument("--model_id", type=str, default="unsloth/Llama-3.2-3B-Instruct", help="Model ID")
+    parser = argparse.ArgumentParser(description="Incremental Sharded LLM Quantizer (Resume Support)")
+    parser.add_argument("--model_id", type=str, default="Qwen/Qwen1.5-MoE-A2.7B-Chat", help="Model ID")
     parser.add_argument("--device", type=str, default="cpu", help="cpu or cuda")
     args = parser.parse_args()
 

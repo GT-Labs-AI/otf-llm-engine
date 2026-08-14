@@ -14,7 +14,7 @@ if os.path.exists(readme_path):
 
 setup(
     name="otf-llm",
-    version="2.1.1",
+    version="3.1.4",
     author="GT Labs AI & Gleb Tikhiy",
     author_email="team.gtlabs@gmail.com",
     description="High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels and ultra-compressed VRAM execution.",

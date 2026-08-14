@@ -16,7 +16,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 try:
-    from safetensors.torch import load_file as safe_load_file
+    from safetensors.torch import safe_open
     HAS_SAFETENSORS = True
 except ImportError:
     HAS_SAFETENSORS = False
@@ -43,7 +43,11 @@ class TritonGlobalSymmetricLinear(GlobalSymmetricINT4Linear):
         bg_in_features = self.in_features - k
         packed_q_2d = self.packed_q_bg.to(device).view(self.out_features, bg_in_features // 2)
 
-        out_bg = triton_fused_int4_linear(x_bg, packed_q_2d, self.scale_bg.to(device), self.group_size)
+        # Dynamic group_size calculation for AWQ (group_size=128) and GPTQ (group_size=64)
+        num_groups = self.scale_bg.shape[1]
+        dynamic_group_size = bg_in_features // num_groups if num_groups > 0 else self.group_size
+
+        out_bg = triton_fused_int4_linear(x_bg, packed_q_2d, self.scale_bg.to(device), dynamic_group_size)
 
         out = out_outliers + out_bg
         if self.bias is not None:
@@ -70,7 +74,8 @@ def fix_rope_position_embeddings(model, config):
 def run_inference(model_id: str, prompt: str = None):
     try:
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         clean_name = model_id.split("/")[-1].lower().replace("-", "_")
 
@@ -134,8 +139,12 @@ def run_inference(model_id: str, prompt: str = None):
             )
 
         print(f"📥 Загрузка сжатого чекпоинта {save_path}...")
+        state_dict = {}
         if is_safetensors:
-            state_dict = safe_load_file(save_path)
+            # Memory-mapped streaming load to prevent Windows os error 1455 commitment limit
+            with safe_open(save_path, framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    state_dict[k] = f.get_tensor(k)
         else:
             state_dict = torch.load(save_path, map_location="cpu")
 
@@ -158,7 +167,7 @@ def run_inference(model_id: str, prompt: str = None):
                         module.bias = nn.Parameter(state_dict.pop(f"{prefix}bias"))
                     module.is_calibrated = True
 
-        # СВЯЗЫВАНИЕ TIED EMBEDDINGS ДЛЯ МОДЕЛЕЙ ТИПА LLAMA-3.2
+        # СВЯЗЫВАНИЕ TIED EMBEDDINGS ДЛЯ МОДЕЛЕЙ ТИПА LLAMA-3.2 И QWEN
         if hasattr(model, "lm_head") and isinstance(model.lm_head, TritonGlobalSymmetricLinear):
             if not model.lm_head.is_calibrated:
                 model.lm_head.tied_embedding = model.model.embed_tokens
@@ -168,9 +177,10 @@ def run_inference(model_id: str, prompt: str = None):
 
         del state_dict
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-        vram_stat = torch.cuda.memory_allocated() / (1024 ** 2)
+        vram_stat = torch.cuda.memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0
         print(f"⚡ Движок успешно загружен ВСЕГО за {time.time() - t0:.2f} сек!")
         print(f"💾 Занято VRAM весами модели: {vram_stat:.2f} МБ ({vram_stat / 1024:.2f} ГБ)\n")
 
@@ -181,7 +191,9 @@ def run_inference(model_id: str, prompt: str = None):
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(text, return_tensors="pt").to(device)
 
-        torch.cuda.reset_peak_memory_stats()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
         t_gen_start = time.time()
         with torch.no_grad():
             tokens = model.generate(
@@ -192,7 +204,7 @@ def run_inference(model_id: str, prompt: str = None):
             )
         t_gen_end = time.time()
 
-        vram_peak = torch.cuda.max_memory_allocated() / (1024 ** 2)
+        vram_peak = torch.cuda.max_memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0
         gen_tokens = tokens.shape[1] - inputs.input_ids.shape[1]
         tps = gen_tokens / (t_gen_end - t_gen_start)
 
@@ -211,7 +223,7 @@ def run_inference(model_id: str, prompt: str = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Универсальный Triton инференс-раннер")
-    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Имя модели")
+    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-7B-Instruct-AWQ", help="Имя модели")
     parser.add_argument("--prompt", type=str, default=None, help="Промпт для генерации")
     args = parser.parse_args()
 
