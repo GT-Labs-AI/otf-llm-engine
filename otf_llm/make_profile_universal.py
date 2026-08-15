@@ -11,7 +11,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def create_act_profile(model_id: str, device: str = "cpu"):
+def create_act_profile(model_id: str, device: str = "cuda"):
     clean_name = model_id.split("/")[-1].lower().replace("-", "_")
     profile_path = f"{clean_name}_act_profile.pt"
 
@@ -25,14 +25,14 @@ def create_act_profile(model_id: str, device: str = "cpu"):
     print("=" * 70)
 
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch.float16,
-        device_map=device,
-        low_cpu_mem_usage=True
-    )
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    ).to(device)
 
     importance_dict = {}
 
@@ -83,8 +83,8 @@ def create_act_profile(model_id: str, device: str = "cpu"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLM Activation Profiler")
-    parser.add_argument("--model_id", type=str, default="unsloth/Llama-3.2-3B-Instruct", help="Model ID")
-    parser.add_argument("--device", type=str, default="cpu", help="cpu or cuda")
+    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-3B-Instruct", help="Model ID")
+    parser.add_argument("--device", type=str, default="cuda", help="cpu or cuda")
     args = parser.parse_args()
 
     create_act_profile(args.model_id, args.device)

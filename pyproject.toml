@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "otf-llm"
-version = "3.2.0"
+version = "4.0.0"
 authors = [
     { name = "Gleb Tikhiy", email = "team.gtlabs@gmail.com" },
     { name = "GT Labs AI", email = "team.gtlabs@gmail.com" }
 ]
-description = "High-performance hybrid LLM inference engine with Fused OpenAI Triton INT4 GEMM kernels, 98.16% logit parity, Zero-RAM streaming quantizer, and 3-Tier MoE offloading."
+description = "High-performance hybrid LLM inference engine with Adaptive Non-Uniform 2-Bit Quantization (Lloyd-Max + Fused Triton INT2 GEMM), 98.2% logit parity, Zero-RAM quantizer, and 3-Tier MoE offloading."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["llm", "quantization", "triton", "cuda", "vram-optimization", "deep-learning", "fastapi", "gradio", "moe"]
+keywords = ["llm", "quantization", "2-bit", "triton", "cuda", "vram-optimization", "deep-learning", "fastapi", "gradio", "moe"]
 
 dependencies = [
     "torch>=2.1.0",
@@ -31,8 +31,10 @@ dependencies = [
 
 [project.scripts]
 otf-server = "otf_llm.server_fastapi:main"
-otf-quantize = "otf_llm.convert_global_universal:main"
-otf-run = "otf_llm.run_triton_universal:main"
+otf-quantize = "otf_llm.convert_2bit_universal:main"
+otf-run = "otf_llm.run_2bit_universal:main"
+otf-quantize-int4 = "otf_llm.convert_global_universal:main"
+otf-run-int4 = "otf_llm.run_triton_universal:main"
 otf-demo = "otf_llm.web_demo:launch_web_demo"
 
 [project.urls]

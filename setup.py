@@ -13,10 +13,10 @@ if os.path.exists(readme_path):
 
 setup(
     name="otf-llm",
-    version="3.2.0",
+    version="4.0.0",
     author="GT Labs AI & Gleb Tikhiy",
     author_email="team.gtlabs@gmail.com",
-    description = "High-performance hybrid LLM inference engine with Fused OpenAI Triton INT4 GEMM kernels, 98.16% logit parity, Zero-RAM streaming quantizer, and 3-Tier MoE offloading.",
+    description="High-performance hybrid LLM inference engine with Adaptive Non-Uniform 2-Bit Quantization (Lloyd-Max + Fused Triton INT2 GEMM), 98.2% logit parity, Zero-RAM quantizer, and 3-Tier MoE offloading.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/GT-Labs-AI/otf-llm-engine",
@@ -53,8 +53,10 @@ setup(
     entry_points={
         "console_scripts": [
             "otf-server=otf_llm.server_fastapi:main",
-            "otf-quantize=otf_llm.convert_global_universal:main",
-            "otf-run=otf_llm.run_triton_universal:main",
+            "otf-quantize=otf_llm.convert_2bit_universal:main",
+            "otf-run=otf_llm.run_2bit_universal:main",
+            "otf-quantize-int4=otf_llm.convert_global_universal:main",
+            "otf-run-int4=otf_llm.run_triton_universal:main",
             "otf-demo=otf_llm.web_demo:launch_web_demo",
         ],
     },

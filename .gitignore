@@ -1,19 +1,21 @@
-# Виртуальное окружение Python
+# Python Virtual Environments
 .venv/
 venv/
 env/
 ENV/
 
+# Build, Distribution, and Packaging Artifacts
 build/
 dist/
 *.egg-info/
 
-# Кэш Python и компилированные файлы
+# Python Bytecode and Runtime Cache
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Тяжелые веса моделей, профили и чекпоинты (не загружаются на GitHub)
+# Quantized Models Directory, Heavy Weights, and Profiles
+models/
 *.pt
 *.safetensors
 *.bin
@@ -21,21 +23,21 @@ __pycache__/
 *.ckpt
 *.onnx
 
-# Конфигурации и кэш IDE / Редакторов кода
+# IDE and Code Editor Configurations
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Системные файлы Windows и macOS
+# Operating System Files (Windows & macOS)
 Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Логи и временные файлы
+# Logs, Temporary Chunks, and Runtime Files
 *.log
 *.tmp
-
-# Временные чанки квантования и локальный файл памяти
-companion_user_memory.json
 tmp_otf_chunks*/
+
+# OTF-LLM Local Companion Memory Store
+companion_user_memory.json
