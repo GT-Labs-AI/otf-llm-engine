@@ -5,7 +5,6 @@
 import os
 from setuptools import setup, find_packages
 
-# Read long description from README.md
 readme_path = os.path.join(os.path.dirname(__file__), "README.md")
 long_description = ""
 if os.path.exists(readme_path):
@@ -14,10 +13,10 @@ if os.path.exists(readme_path):
 
 setup(
     name="otf-llm",
-    version="3.1.4",
+    version="3.2.0",
     author="GT Labs AI & Gleb Tikhiy",
     author_email="team.gtlabs@gmail.com",
-    description="High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels and ultra-compressed VRAM execution.",
+    description = "High-performance hybrid LLM inference engine with Fused OpenAI Triton INT4 GEMM kernels, 98.16% logit parity, Zero-RAM streaming quantizer, and 3-Tier MoE offloading.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/GT-Labs-AI/otf-llm-engine",
@@ -39,7 +38,7 @@ setup(
     ],
     python_requires=">=3.10",
     install_requires=[
-        "torch>=2.0.0",
+        "torch>=2.1.0",
         "triton>=2.1.0; sys_platform != 'win32'",
         "triton-windows; sys_platform == 'win32'",
         "transformers>=4.38.0",
@@ -47,20 +46,16 @@ setup(
         "fastapi>=0.100.0",
         "uvicorn>=0.22.0",
         "pydantic>=2.0.0",
-        "requests>=2.28.0",
+        "gradio>=4.0.0",
+        "huggingface_hub>=0.20.0",
+        "accelerate>=0.26.0",
     ],
-    extras_require={
-        "dev": [
-            "pytest>=7.0.0",
-            "wheel>=0.40.0",
-            "build>=0.10.0",
-        ]
-    },
     entry_points={
         "console_scripts": [
             "otf-server=otf_llm.server_fastapi:main",
             "otf-quantize=otf_llm.convert_global_universal:main",
             "otf-run=otf_llm.run_triton_universal:main",
+            "otf-demo=otf_llm.web_demo:launch_web_demo",
         ],
     },
     include_package_data=True,

@@ -3,20 +3,21 @@
 # Distributed under the terms of the MIT License.
 
 """
-OTF-LLM Engine Package (v3.1.0)
+OTF-LLM Engine Package (v3.2.0)
 ===============================
-High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels
-and 3-Tier Hierarchical MoE Expert Offloading (Disk -> CPU RAM -> GPU VRAM).
+High-performance hybrid LLM inference engine featuring custom Fused Triton INT4 GEMM kernels,
+Zero-RAM Incremental Quantizer, 3-Tier Hierarchical MoE Offloading (Disk -> CPU RAM -> GPU VRAM),
+and Gradio Interactive Web UI.
 """
 
-__version__ = "3.1.4"
+__version__ = "3.2.0"
 __author__ = "GT Labs AI & Gleb Tikhiy"
 __email__ = "team.gtlabs@gmail.com"
 
 from .convert_global_universal import QuantizedEmbedding, GlobalSymmetricINT4Linear, convert_model
 from .make_profile_universal import create_act_profile
 from .otf_triton_kernel import triton_fused_int4_linear
-from .run_triton_universal import TritonGlobalSymmetricLinear, run_inference
+from .run_triton_universal import TritonGlobalSymmetricLinear, run_inference, fix_rope_position_embeddings
 from .companion_memory import CompanionMemoryManager
 from .otf_moe_offloader import (
     Hierarchical3TierMoECache,
@@ -24,6 +25,13 @@ from .otf_moe_offloader import (
     AsynchronousExpertStreamer,
     OTFSparseMoeBlockWrapper,
 )
+from .direct_quantized_importer import import_prequantized_hf_model
+
+try:
+    from .web_demo import launch_web_demo
+except ImportError:
+    def launch_web_demo(*args, **kwargs):
+        raise ImportError("`launch_web_demo` requires `gradio`. Please install it with `pip install gradio`.")
 
 __all__ = [
     "QuantizedEmbedding",
@@ -33,9 +41,12 @@ __all__ = [
     "create_act_profile",
     "convert_model",
     "run_inference",
+    "fix_rope_position_embeddings",
     "CompanionMemoryManager",
     "Hierarchical3TierMoECache",
     "MoEExpertLRUCache",
     "AsynchronousExpertStreamer",
     "OTFSparseMoeBlockWrapper",
+    "launch_web_demo",
+    "import_prequantized_hf_model",
 ]

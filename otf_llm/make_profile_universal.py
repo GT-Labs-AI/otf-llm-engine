@@ -27,7 +27,6 @@ def create_act_profile(model_id: str, device: str = "cpu"):
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    # Load model with minimal RAM footprint
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.float16,
@@ -57,7 +56,7 @@ def create_act_profile(model_id: str, device: str = "cpu"):
     prompts = [
         "Write a complex Python function to solve the Traveling Salesperson Problem with dynamic programming.",
         "Explain the internal mechanics of Transformer self-attention and Rotary Position Embeddings (RoPE).",
-        "Составь подробный план оптимизации VRAM при работе с крупными языковыми моделями."
+        "Draft a detailed VRAM optimization guide for running large language models on consumer GPUs."
     ]
 
     with torch.no_grad():
@@ -74,8 +73,8 @@ def create_act_profile(model_id: str, device: str = "cpu"):
     hooks.clear()
     del model, tokenizer
     gc.collect()
-    torch.cuda.empty_cache()
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 
     print(f"⚡ Profile generated & RAM purged in {time.time() - t0:.2f} sec! File: {profile_path}\n")

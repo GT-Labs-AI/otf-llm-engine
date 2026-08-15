@@ -57,7 +57,7 @@ class TritonGlobalSymmetricLinear(GlobalSymmetricINT4Linear):
 
 
 def fix_rope_position_embeddings(model, config):
-    """Точная математическая инициализация RoPE таблиц без загрузки FP16 тяжелых весов"""
+    """Accurate mathematical initialization of RoPE tables without loading heavy FP16 weights."""
     for m in model.modules():
         if hasattr(m, "inv_freq"):
             dim = m.inv_freq.shape[0] * 2 if m.inv_freq.numel() > 0 else (
@@ -89,21 +89,44 @@ def run_inference(model_id: str, prompt: str = None):
             save_path = save_path_pt
             is_safetensors = False
         else:
-            raise FileNotFoundError(f"Сжатый чекпоинт не найден! Сначала запустите convert_global_universal.py")
+            raise FileNotFoundError(f"Compressed checkpoint not found! Please run convert_global_universal.py first.")
 
         t0 = time.time()
         print("=" * 70)
-        print(f"🚀 МГНОВЕННЫЙ СТАРТ TRITON ENGINE ДЛЯ МОДЕЛИ: {model_id}")
-        print(f"📦 Файл чекпоинта: {save_path} (0 МБ FP16 в ОЗУ!)")
+        print(f"🚀 INSTANT TRITON ENGINE START FOR MODEL: {model_id}")
+        print(f"📦 Checkpoint File: {save_path} (0 MB FP16 in RAM!)")
         print("=" * 70)
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        config = AutoConfig.from_pretrained(model_id)
+        config = None
+
+        clean_name = model_id.split("/")[-1].lower().replace("-", "_")
+        local_config_path = f"config_{clean_name}.json"
+
+        if os.path.exists(local_config_path):
+            config_file = local_config_path
+        elif os.path.exists("config.json"):
+            config_file = "config.json"
+        else:
+            config_file = None
+
+        if config_file:
+            import json
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    config_dict = json.load(f)
+                config = AutoConfig.from_dict(config_dict)
+            except Exception:
+                config = None
+
+        # 3. Резервный вызов из HF Hub
+        if config is None:
+            config = AutoConfig.from_pretrained(model_id)
 
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        # МГНОВЕННОЕ СОЗДАНИЕ ПУСТОГО СКЕЛЕТА СЕТИ (0 МБ ВЕСОВ В ОЗУ!)
+        # Empty model skeleton on meta device
         with torch.device("meta"):
             raw_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
 
@@ -138,7 +161,7 @@ def run_inference(model_id: str, prompt: str = None):
                 bias=(model.lm_head.bias is not None)
             )
 
-        print(f"📥 Загрузка сжатого чекпоинта {save_path}...")
+        print(f"📥 Loading compressed safetensors checkpoint {save_path}...")
         state_dict = {}
         if is_safetensors:
             # Memory-mapped streaming load to prevent Windows os error 1455 commitment limit
@@ -167,7 +190,7 @@ def run_inference(model_id: str, prompt: str = None):
                         module.bias = nn.Parameter(state_dict.pop(f"{prefix}bias"))
                     module.is_calibrated = True
 
-        # СВЯЗЫВАНИЕ TIED EMBEDDINGS ДЛЯ МОДЕЛЕЙ ТИПА LLAMA-3.2 И QWEN
+        # Tied embeddings fallback for Llama-3.2 / Qwen
         if hasattr(model, "lm_head") and isinstance(model.lm_head, TritonGlobalSymmetricLinear):
             if not model.lm_head.is_calibrated:
                 model.lm_head.tied_embedding = model.model.embed_tokens
@@ -181,11 +204,11 @@ def run_inference(model_id: str, prompt: str = None):
             torch.cuda.empty_cache()
 
         vram_stat = torch.cuda.memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0
-        print(f"⚡ Движок успешно загружен ВСЕГО за {time.time() - t0:.2f} сек!")
-        print(f"💾 Занято VRAM весами модели: {vram_stat:.2f} МБ ({vram_stat / 1024:.2f} ГБ)\n")
+        print(f"⚡ Engine successfully loaded in ONLY {time.time() - t0:.2f} sec!")
+        print(f"💾 Static VRAM Allocated for Model Weights: {vram_stat:.2f} MB ({vram_stat / 1024:.2f} GB)\n")
 
         if not prompt:
-            prompt = "Напиши короткую функцию на Python для алгоритма бинарного поиска."
+            prompt = "Write a high-performance binary search function in Python with docstring."
 
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -209,22 +232,22 @@ def run_inference(model_id: str, prompt: str = None):
         tps = gen_tokens / (t_gen_end - t_gen_start)
 
         print("=" * 70)
-        print(f"📊 МЕТРИКИ ГЕНЕРАЦИИ:")
-        print(f"  • Скорость:      {tps:.2f} токенов/сек")
-        print(f"  • Пиковый VRAM:  {vram_peak:.2f} МБ ({vram_peak / 1024:.2f} ГБ)")
+        print(f"📊 GENERATION METRICS:")
+        print(f"  • Speed:         {tps:.2f} tokens/sec")
+        print(f"  • Peak VRAM:     {vram_peak:.2f} MB ({vram_peak / 1024:.2f} GB)")
         print("=" * 70)
-        print(f"\n📝 Ответ модели:\n")
+        print(f"\n📝 Model Response:\n")
         print(tokenizer.decode(tokens[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip())
 
     except Exception as e:
-        print("\n❌ ОШИБКА ИНФЕРЕНСА:")
+        print("\n❌ INFERENCE ERROR:")
         traceback.print_exc()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Универсальный Triton инференс-раннер")
-    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-7B-Instruct-AWQ", help="Имя модели")
-    parser.add_argument("--prompt", type=str, default=None, help="Промпт для генерации")
+    parser = argparse.ArgumentParser(description="Universal Triton Inference Runner")
+    parser.add_argument("--model_id", type=str, default="unsloth/Llama-3.2-3B-Instruct", help="Model ID")
+    parser.add_argument("--prompt", type=str, default=None, help="Prompt for generation")
     args = parser.parse_args()
 
     run_inference(args.model_id, args.prompt)

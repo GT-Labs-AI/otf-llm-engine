@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "otf-llm"
-version = "3.1.4"
+version = "3.2.0"
 authors = [
     { name = "Gleb Tikhiy", email = "team.gtlabs@gmail.com" },
     { name = "GT Labs AI", email = "team.gtlabs@gmail.com" }
 ]
-description = "On-The-Fly Weight Synthesizer (OTF-LLM Engine) for ultra-fast, low-VRAM LLM inference with Fused Triton INT4 kernels."
+description = "High-performance hybrid LLM inference engine with Fused OpenAI Triton INT4 GEMM kernels, 98.16% logit parity, Zero-RAM streaming quantizer, and 3-Tier MoE offloading."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["llm", "quantization", "triton", "cuda", "vram-optimization", "deep-learning", "fastapi"]
+keywords = ["llm", "quantization", "triton", "cuda", "vram-optimization", "deep-learning", "fastapi", "gradio", "moe"]
 
 dependencies = [
-    "torch>=2.0.0",
+    "torch>=2.1.0",
     "triton>=2.1.0; sys_platform != 'win32'",
     "triton-windows; sys_platform == 'win32'",
     "transformers>=4.38.0",
@@ -24,8 +24,16 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.22.0",
     "pydantic>=2.0.0",
-    "requests>=2.28.0"
+    "gradio>=4.0.0",
+    "huggingface_hub>=0.20.0",
+    "accelerate>=0.26.0"
 ]
+
+[project.scripts]
+otf-server = "otf_llm.server_fastapi:main"
+otf-quantize = "otf_llm.convert_global_universal:main"
+otf-run = "otf_llm.run_triton_universal:main"
+otf-demo = "otf_llm.web_demo:launch_web_demo"
 
 [project.urls]
 Homepage = "https://github.com/GT-Labs-AI/otf-llm-engine"

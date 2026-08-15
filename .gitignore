@@ -35,3 +35,7 @@ Desktop.ini
 # Логи и временные файлы
 *.log
 *.tmp
+
+# Временные чанки квантования и локальный файл памяти
+companion_user_memory.json
+tmp_otf_chunks*/
