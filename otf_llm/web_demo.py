@@ -1,165 +1,213 @@
-# OTF-LLM Engine (On-The-Fly Weight Synthesizer)
-# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
-# Distributed under the terms of the MIT License.
-# otf_llm/web_demo.py
+"""
+OTF-LLM Engine: Interactive Gradio Web UI & RLM File Analyzer
+Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
+Distributed under the terms of the MIT License.
+"""
 
 import os
+import sys
 import time
 import torch
 import gradio as gr
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+from transformers import AutoTokenizer
 
-from .convert_global_universal import QuantizedEmbedding
-from .run_triton_universal import TritonGlobalSymmetricLinear, fix_rope_position_embeddings
-from .companion_memory import CompanionMemoryManager
+# Add root directory to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-MODEL_ID = "unsloth/Llama-3.2-3B-Instruct"
-device = "cuda" if torch.cuda.is_available() else "cpu"
+from otf_llm.run_rlm_file import load_model_2bit_engine
+from otf_llm.rlm_agent import ContextContainer, PythonREPLExecutor
 
-model = None
-tokenizer = None
-memory_manager = None
-
-
-def load_engine_for_demo(model_id_param: str = MODEL_ID):
-    global model, tokenizer, memory_manager
-    t0 = time.time()
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id_param)
-    config = AutoConfig.from_pretrained(model_id_param)
-
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    memory_manager = CompanionMemoryManager()
-
-    clean_name = model_id_param.split("/")[-1].lower().replace("-", "_")
-    save_path = f"otf_{clean_name}_compressed.safetensors"
-
-    if not os.path.exists(save_path):
-        from .convert_global_universal import convert_model
-        convert_model(model_id_param, device="cpu")
-
-    with torch.device("meta"):
-        raw_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
-
-    model = raw_model.to_empty(device="cpu")
-    fix_rope_position_embeddings(model, config)
-
-    old_emb = model.model.embed_tokens
-    model.model.embed_tokens = QuantizedEmbedding(old_emb.num_embeddings, old_emb.embedding_dim, original_emb=None)
-
-    for name, module in model.named_modules():
-        if "mlp" in name or "self_attn" in name:
-            for child_name, child_module in module.named_children():
-                if isinstance(child_module, torch.nn.Linear):
-                    new_linear = TritonGlobalSymmetricLinear(child_module.in_features, child_module.out_features,
-                                                             bias=(child_module.bias is not None))
-                    setattr(module, child_name, new_linear)
-
-    if hasattr(model, "lm_head") and isinstance(model.lm_head, torch.nn.Linear):
-        model.lm_head = TritonGlobalSymmetricLinear(model.lm_head.in_features, model.lm_head.out_features,
-                                                    bias=(model.lm_head.bias is not None))
-
-    from safetensors.torch import safe_open
-    state_dict = {}
-    with safe_open(save_path, framework="pt", device="cpu") as f:
-        for k in f.keys():
-            state_dict[k] = f.get_tensor(k)
-
-    for emb_key in ["model.embed_tokens.packed_q", "embed_tokens.packed_q"]:
-        if emb_key in state_dict:
-            model.model.embed_tokens.packed_q = state_dict.pop(emb_key)
-            scale_key = emb_key.replace("packed_q", "scale")
-            model.model.embed_tokens.scale = state_dict.pop(scale_key)
-            break
-
-    for name, module in model.named_modules():
-        if isinstance(module, TritonGlobalSymmetricLinear):
-            prefix = f"{name}." if name else ""
-            if f"{prefix}packed_q_bg" in state_dict:
-                module.perm_idx = state_dict.pop(f"{prefix}perm_idx")
-                module.W_outliers_fp16 = state_dict.pop(f"{prefix}W_outliers_fp16")
-                module.packed_q_bg = state_dict.pop(f"{prefix}packed_q_bg")
-                module.scale_bg = state_dict.pop(f"{prefix}scale_bg")
-                if f"{prefix}bias" in state_dict:
-                    module.bias = torch.nn.Parameter(state_dict.pop(f"{prefix}bias"))
-                module.is_calibrated = True
-
-    model.load_state_dict(state_dict, strict=False)
-    model.to(device)
-
-    vram_mb = torch.cuda.memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0
-    return f"⚡ Loaded in {time.time() - t0:.2f}s | Static VRAM: {vram_mb:.2f} MB ({vram_mb / 1024:.2f} GB)"
+# Global model state
+GLOBAL_MODEL = None
+GLOBAL_TOKENIZER = None
+GLOBAL_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEFAULT_MODEL_DIR = "./models/Qwen-3B-2Bit"
+DEFAULT_BASE_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 
-def chat_response(message: str, history):
-    global model, tokenizer, memory_manager
-    if model is None:
-        status = load_engine_for_demo()
+def initialize_engine_if_needed(model_dir: str = DEFAULT_MODEL_DIR, base_model: str = DEFAULT_BASE_ID):
+    """Loads 2-bit model into VRAM on first startup."""
+    global GLOBAL_MODEL, GLOBAL_TOKENIZER
+    if GLOBAL_MODEL is None:
+        print(f"📦 [Web UI] Loading 2-Bit Model from '{model_dir}'...", flush=True)
+        GLOBAL_MODEL = load_model_2bit_engine(model_dir, base_model, device=GLOBAL_DEVICE)
+        GLOBAL_TOKENIZER = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
-    # Extract user personal facts automatically
-    memory_manager.auto_extract_and_store(message)
 
-    # Inject Memory into System Prompt
-    system_prompt = "You are an advanced AI Assistant powered by GT Labs AI OTF-LLM Engine."
-    enhanced_system = memory_manager.inject_memory_into_system_prompt(system_prompt, message)
+def chat_generate(message: str, history: list, max_tokens: int, temperature: float, repetition_penalty: float):
+    """Standard conversational streaming inference."""
+    initialize_engine_if_needed()
 
-    messages = [{"role": "system", "content": enhanced_system}]
-    for user_msg, assistant_msg in history:
+    messages = [{"role": "system",
+                 "content": "You are an intelligent, helpful AI assistant powered by GT Labs AI OTF-LLM Engine."}]
+    for user_msg, bot_msg in history:
         messages.append({"role": "user", "content": user_msg})
-        messages.append({"role": "assistant", "content": assistant_msg})
+        if bot_msg:
+            messages.append({"role": "assistant", "content": bot_msg})
+
     messages.append({"role": "user", "content": message})
 
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(prompt_text, return_tensors="pt").to(device)
+    prompt_text = GLOBAL_TOKENIZER.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = GLOBAL_TOKENIZER(prompt_text, return_tensors="pt").to(GLOBAL_DEVICE)
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-
-    t0 = time.time()
     with torch.no_grad():
-        outputs = model.generate(
+        outputs = GLOBAL_MODEL.generate(
             **inputs,
-            max_new_tokens=256,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id
+            max_new_tokens=max_tokens,
+            do_sample=temperature > 0.0,
+            temperature=max(temperature, 0.01) if temperature > 0.0 else None,
+            repetition_penalty=repetition_penalty,
+            pad_token_id=GLOBAL_TOKENIZER.eos_token_id
         )
-    t_gen = time.time() - t0
 
-    gen_tokens = outputs.shape[1] - inputs.input_ids.shape[1]
-    tps = gen_tokens / t_gen
-    vram_peak = torch.cuda.max_memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0
-
-    response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
-
-    info_footer = f"\n\n---\n📊 **GT Labs AI Metrics:** Speed: `{tps:.2f} t/s` | Peak VRAM: `{vram_peak:.2f} MB ({vram_peak / 1024:.2f} GB)`"
-    return response + info_footer
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    response = GLOBAL_TOKENIZER.decode(new_tokens, skip_special_tokens=True).strip()
+    return response
 
 
-def launch_web_demo():
-    print("🚀 Launching GT Labs AI Web Demo...")
-    load_engine_for_demo()
+def rlm_analyze_file(file_obj, query: str):
+    """RLM Context-as-a-Variable file analyzer."""
+    if file_obj is None:
+        return "❌ Error: Please upload a text/code/log file first.", ""
 
-    with gr.Blocks(title="OTF-LLM Engine Demo | GT Labs AI") as demo:
+    initialize_engine_if_needed()
+
+    file_path = file_obj.name if hasattr(file_obj, "name") else str(file_obj)
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+
+    ctx = ContextContainer(content, name="ctx")
+    status_log = [f"📦 Context Loaded: `{ctx.describe()}` ({len(content) / 1024:.1f} KB)"]
+
+    system_prompt = (
+        "You are an expert AI Systems Engineer analyzing a file loaded in variable `ctx`.\n"
+        "To search the document, output `print(ctx.grep('keyword'))`."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "Find database configuration and server port."},
+        {"role": "assistant", "content": "```python\nprint(ctx.grep(\"database\"))\nprint(ctx.grep(\"port\"))\n```"},
+        {"role": "user", "content": query}
+    ]
+
+    env_vars = {"ctx": ctx}
+    final_answer = ""
+
+    for turn in range(1, 3):
+        prompt_text = GLOBAL_TOKENIZER.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = GLOBAL_TOKENIZER(prompt_text, return_tensors="pt").to(GLOBAL_DEVICE)
+
+        with torch.no_grad():
+            outputs = GLOBAL_MODEL.generate(
+                **inputs,
+                max_new_tokens=192,
+                do_sample=False,
+                repetition_penalty=1.15,
+                pad_token_id=GLOBAL_TOKENIZER.eos_token_id
+            )
+        new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+        response = GLOBAL_TOKENIZER.decode(new_tokens, skip_special_tokens=True).strip()
+
+        messages.append({"role": "assistant", "content": response})
+
+        res = PythonREPLExecutor.execute(response, env_vars, fallback_query=query if turn == 1 else "")
+
+        if turn == 1:
+            status_log.append(f"⚡ [Turn 1 Action]:\n{res['executed_code']}")
+            obs = res["stdout"] if res["stdout"] else "[No matching lines found]"
+            status_log.append(f"📥 [Observation]:\n{obs[:500]}")
+
+            messages.append({
+                "role": "user",
+                "content": f"Facts extracted from document:\n{obs}\n\nAnswer the user request directly based strictly on these facts: '{query}'"
+            })
+        else:
+            final_answer = response
+            break
+
+    vram_stat = f"{torch.cuda.max_memory_allocated() / (1024 ** 3):.2f} GB" if torch.cuda.is_available() else "N/A"
+    status_log.append(f"\n📊 Peak VRAM Usage: {vram_stat}")
+
+    return final_answer, "\n\n".join(status_log)
+
+
+def get_system_vram_stats():
+    """Returns live VRAM telemetry."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        max_alloc = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        device_name = torch.cuda.get_device_name(0)
+        return f"🖥️ **Device:** {device_name}\n\n- **Active VRAM:** {allocated:.2f} GB\n- **Reserved VRAM:** {reserved:.2f} GB\n- **Peak VRAM:** {max_alloc:.2f} GB"
+    return "Running on CPU (CUDA not active)"
+
+
+def launch_web_demo(host: str = "0.0.0.0", port: int = 7860, share: bool = False):
+    """Launches the Gradio interface."""
+    with gr.Blocks(title="OTF-LLM Engine v4.0", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
             """
-            # 🚀 OTF-LLM Engine (On-The-Fly Weight Synthesizer)
-            ### Official Interactive Demo by **GT Labs AI** & **Gleb Tikhiy**
-            *Ultra-fast, Outlier-Aware INT4 Inference Engine powered by Custom OpenAI Triton Kernels.*
+            # 🚀 OTF-LLM Engine (v4.0.0) — High-Performance 2-Bit LLM & RLM Suite
+            **Developed by GT Labs AI & Gleb Tikhiy** • *Adaptive Non-Uniform 2-Bit Quantization + Recursive Context Engine (<2.4 GB VRAM)*
             """
         )
 
-        gr.Chatinterface(
-            fn=chat_response,
-            examples=[
-                "Write a high-performance binary search in Python.",
-                "Explain quantum computing in 2 simple sentences.",
-                "My name is Alex and I am an AI researcher."
-            ]
-        )
+        with gr.Tabs():
+            # Tab 1: Chat
+            with gr.TabItem("⚡ 2-Bit High-Speed Chat"):
+                chatbot = gr.Chatbot(height=480)
+                msg = gr.Textbox(label="Your Message", placeholder="Ask anything...", lines=2)
+                with gr.Row():
+                    clear_btn = gr.Button("Clear Chat")
+                    submit_btn = gr.Button("Send Message", variant="primary")
 
-    demo.queue().launch(share=True)
+                with gr.Accordion("⚙️ Inference Hyperparameters", open=False):
+                    max_tokens_slider = gr.Slider(64, 1024, value=256, step=32, label="Max New Tokens")
+                    temp_slider = gr.Slider(0.0, 1.5, value=0.7, step=0.05, label="Temperature")
+                    rep_slider = gr.Slider(1.0, 1.5, value=1.15, step=0.05, label="Repetition Penalty")
+
+                def user_input(user_message, history):
+                    return "", history + [[user_message, None]]
+
+                def bot_response(history, max_tokens, temp, rep):
+                    user_msg = history[-1][0]
+                    bot_msg = chat_generate(user_msg, history[:-1], max_tokens, temp, rep)
+                    history[-1][1] = bot_msg
+                    return history
+
+                msg.submit(user_input, [msg, chatbot], [msg, chatbot], queue=False).then(
+                    bot_response, [chatbot, max_tokens_slider, temp_slider, rep_slider], chatbot
+                )
+                submit_btn.click(user_input, [msg, chatbot], [msg, chatbot], queue=False).then(
+                    bot_response, [chatbot, max_tokens_slider, temp_slider, rep_slider], chatbot
+                )
+                clear_btn.click(lambda: None, None, chatbot, queue=False)
+
+            # Tab 2: RLM File Analyzer
+            with gr.TabItem("🧠 RLM Infinite Context File Analyzer"):
+                gr.Markdown("### 📄 Analyze Massive Codebases, Logs or Documents (Context-as-a-Variable)")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        file_input = gr.File(label="Upload Document / Log / Code (.txt, .py, .md, .log, .json)")
+                        query_input = gr.Textbox(label="Question about the file",
+                                                 placeholder="e.g. Find error logs and server IP...", lines=3)
+                        analyze_btn = gr.Button("🚀 Run RLM Codebase Audit", variant="primary")
+
+                    with gr.Column(scale=1):
+                        output_answer = gr.Textbox(label="🎯 Synthesized Answer", lines=6)
+                        execution_trace = gr.Textbox(label="🔍 Autonomous RLM Execution Log", lines=8)
+
+                analyze_btn.click(rlm_analyze_file, [file_input, query_input], [output_answer, execution_trace])
+
+            # Tab 3: Diagnostics
+            with gr.TabItem("📊 Hardware & Engine Diagnostics"):
+                diag_box = gr.Markdown(get_system_vram_stats())
+                refresh_btn = gr.Button("🔄 Refresh Hardware Telemetry")
+                refresh_btn.click(get_system_vram_stats, None, diag_box)
+
+    print(f"\n🌐 Launching OTF-LLM Gradio Web UI on http://{host}:{port}...", flush=True)
+    demo.launch(server_name=host, server_port=port, share=share)
 
 
 if __name__ == "__main__":

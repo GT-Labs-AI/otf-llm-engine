@@ -1,43 +1,56 @@
-# Python Virtual Environments
-.venv/
-venv/
-env/
-ENV/
-
-# Build, Distribution, and Packaging Artifacts
-build/
-dist/
-*.egg-info/
-
-# Python Bytecode and Runtime Cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Quantized Models Directory, Heavy Weights, and Profiles
-models/
-*.pt
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Model Weights & Huge Datasets
+models/*
+!models/.gitkeep
 *.safetensors
+*.pt
 *.bin
-*.pth
-*.ckpt
 *.onnx
 
-# IDE and Code Editor Configurations
-.vscode/
+# Data, Codebase Dumps & Temp Files
+data/
+offload/
+*.tmp
+*.log
+
+# RLM Agent Cache & Skills
+.otf/
+
+# Activation Profiles & Temporary Profiling
+*_act_profile.pt
+qwen_profile.pt
+profile_*.pt
+
+# IDE & OS Files
 .idea/
+.vscode/
 *.swp
 *.swo
-
-# Operating System Files (Windows & macOS)
-Thumbs.db
-Desktop.ini
 .DS_Store
-
-# Logs, Temporary Chunks, and Runtime Files
-*.log
-*.tmp
-tmp_otf_chunks*/
-
-# OTF-LLM Local Companion Memory Store
-companion_user_memory.json
+Thumbs.db

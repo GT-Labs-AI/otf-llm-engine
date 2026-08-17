@@ -191,9 +191,12 @@ class OTF2BitLinear(nn.Module):
             self.has_outliers = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 1. Execute Fused OpenAI Triton INT2 GEMM in SRAM registers with Outlier Masking
+        orig_dtype = x.dtype
+        x_fp16 = x.to(dtype=torch.float16)
+
+        # 1. Execute High-Speed 2-Bit Dequantization / GEMM
         y = triton_2bit_gemm(
-            x=x,
+            x=x_fp16,
             packed_uint8=self.packed_uint8,
             scales=self.scales,
             zeros=self.zeros,
@@ -206,11 +209,14 @@ class OTF2BitLinear(nn.Module):
         if self.has_bias:
             y = y + self.bias
 
-        # 3. Add exact Outlier Anchor contributions (added exactly once!)
+        # 3. Add exact Outlier Anchor contributions
         if self.has_outliers:
-            x_fp16 = x.to(dtype=torch.float16)
-            x_out = x_fp16.index_select(dim=-1, index=self.outlier_indices)
-            y_out = F.linear(x_out, self.outliers_fp16)
+            x_out = x_fp16.index_select(dim=-1, index=self.outlier_indices).contiguous()
+            outliers = self.outliers_fp16.to(device=x.device, dtype=torch.float16).contiguous()
+            y_out = torch.matmul(x_out, outliers.T)
             y = y + y_out
+
+        if y.dtype != orig_dtype:
+            y = y.to(dtype=orig_dtype)
 
         return y

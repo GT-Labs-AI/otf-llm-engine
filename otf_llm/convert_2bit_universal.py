@@ -1,9 +1,6 @@
 """
-OTF-LLM Engine v4.0 - Universal 2-Bit Quantizer & Model Converter
+OTF-LLM Engine v4.0 - Universal 2-Bit Quantizer & Model Converter (Colab Zero-RAM Edition)
 Copyright (c) 2026 GT Labs AI & Gleb Tikhiy. MIT License.
-
-Converts HuggingFace LLM checkpoints (Llama-3.2-3B, Qwen2.5-3B/7B) into
-Adaptive Non-Uniform 2-Bit format with Profile-Guided FP16 Outlier Anchors.
 """
 
 import os
@@ -102,34 +99,41 @@ def convert_model_to_2bit(
         print(f"⚙️ Quantization Parameters: 2-Bit Group Size = {group_size}, Outliers = {outlier_ratio * 100:.1f}%", flush=True)
         print("-" * 70, flush=True)
 
-        quantizer = OTF2BitQuantizer(group_size=group_size, outlier_ratio=outlier_ratio)
-
-        base_tensors: Dict[str, torch.Tensor] = {}
-        quantized_tensors: Dict[str, torch.Tensor] = {}
-
-        # 1. Non-recurrent layer weights
+        # 1. Сразу извлекаем и СОХРАНЯЕМ нерекуррентные слои (Embeddings & Norms), затем очищаем ОЗУ!
         print("🔍 Preserving non-recurrent layers (Embeddings, Norms, LM Head)...", flush=True)
         non_recurrent_keys = [
             k for k in tensor_file_map.keys() if "model.layers." not in k
         ]
 
+        base_tensors: Dict[str, torch.Tensor] = {}
         for k in non_recurrent_keys:
             st_path = tensor_file_map[k]
             with safe_open(st_path, framework="pt", device="cpu") as f:
-                base_tensors[k] = f.get_tensor(k).clone()
+                base_tensors[k] = f.get_tensor(k)
 
-        # Preserve layer norms
+        # Сохраняем веса LayerNorms
         for i in range(num_layers):
             for norm_suffix in ["input_layernorm.weight", "post_attention_layernorm.weight"]:
                 k = f"model.layers.{i}.{norm_suffix}"
                 if k in tensor_file_map:
                     st_path = tensor_file_map[k]
                     with safe_open(st_path, framework="pt", device="cpu") as f:
-                        base_tensors[k] = f.get_tensor(k).clone()
+                        base_tensors[k] = f.get_tensor(k)
 
-        print("✅ Non-recurrent layers cached. Starting Profile-Guided 2-bit quantization...", flush=True)
+        base_file = os.path.join(output_dir, "otf_2bit_base.safetensors")
+        print(f"💾 Saving Non-Recurrent Base Weights ({len(base_tensors)} tensors) -> {base_file}", flush=True)
+        save_file(base_tensors, base_file)
 
-        # 2. Process each layer projection weight
+        # 🚀 МГНОВЕННОЕ ОСВОБОЖДЕНИЕ ~3.5 ГБ CPU RAM!
+        del base_tensors
+        gc.collect()
+        print("🧹 Cleared base weights from CPU RAM.", flush=True)
+
+        # 2. Послойная 2-битная квантовка
+        quantizer = OTF2BitQuantizer(group_size=group_size, outlier_ratio=outlier_ratio)
+        quantized_tensors: Dict[str, torch.Tensor] = {}
+
+        print("✅ Starting Profile-Guided 2-Bit Quantization...", flush=True)
         start_time = time.time()
 
         for i in range(num_layers):
@@ -140,21 +144,19 @@ def convert_model_to_2bit(
 
                 st_path = tensor_file_map[full_key_w]
                 with safe_open(st_path, framework="pt", device="cpu") as f:
-                    W_fp16 = f.get_tensor(full_key_w).clone().to(device=device, dtype=torch.float16)
+                    W_fp16 = f.get_tensor(full_key_w).to(device=device, dtype=torch.float16)
 
                 if full_key_b in tensor_file_map:
                     st_path_b = tensor_file_map[full_key_b]
                     with safe_open(st_path_b, framework="pt", device="cpu") as f:
-                        quantized_tensors[f"model.layers.{i}.{proj_key}.bias"] = f.get_tensor(full_key_b).clone()
+                        quantized_tensors[f"model.layers.{i}.{proj_key}.bias"] = f.get_tensor(full_key_b)
 
-                # Extract profile for this layer module
                 profile_tensor = None
                 if act_profiles is not None:
                     mod_name = f"model.layers.{i}.{proj_key}"
                     if mod_name in act_profiles:
                         profile_tensor = act_profiles[mod_name].to(device)
 
-                # Quantize matrix with activation profile guidance $|W| \times |X|$
                 packed_uint8, scales, zeros, out_deltas, out_idx = quantizer.quantize_tensor(
                     W_fp16,
                     activation_profile=profile_tensor
@@ -170,6 +172,7 @@ def convert_model_to_2bit(
                     quantized_tensors[f"{prefix}.outlier_indices"] = out_idx.cpu()
 
                 del W_fp16
+
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -177,12 +180,8 @@ def convert_model_to_2bit(
         print("-" * 70, flush=True)
         print(f"✅ 2-Bit Quantization Completed in {conversion_time:.2f} seconds.", flush=True)
 
-        base_file = os.path.join(output_dir, "otf_2bit_base.safetensors")
         quant_file = os.path.join(output_dir, "otf_2bit_model.safetensors")
         config_file = os.path.join(output_dir, "otf_2bit_config.json")
-
-        print(f"💾 Saving Non-Recurrent Base Weights ({len(base_tensors)} tensors) -> {base_file}", flush=True)
-        save_file(base_tensors, base_file)
 
         print(f"💾 Saving 2-Bit Quantized Layers ({len(quantized_tensors)} tensors) -> {quant_file}", flush=True)
         save_file(quantized_tensors, quant_file)

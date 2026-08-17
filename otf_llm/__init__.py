@@ -3,18 +3,18 @@
 # Distributed under the terms of the MIT License.
 
 """
-OTF-LLM Engine Package (v4.0.0)
+OTF-LLM Engine Package (v4.1.0)
 ===============================
 High-performance hybrid LLM inference engine featuring Adaptive Non-Uniform 2-Bit Quantization
 (Lloyd-Max Codebooks + Fused OpenAI Triton INT2 Kernel), Profile-Guided Outlier Anchors,
-Zero-RAM Incremental Quantizer, 3-Tier Hierarchical MoE Offloading, and Gradio Interactive Web UI.
+Zero-RAM Incremental Quantizer, Recursive Language Models (RLM / Context-as-a-Variable), and Web UI.
 """
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 __author__ = "GT Labs AI & Gleb Tikhiy"
 __email__ = "team.gtlabs@gmail.com"
 
-# v4.0 2-Bit Non-Uniform Quantization & Triton INT2 Kernel Exports
+# v4.0/v4.1 2-Bit Non-Uniform Quantization & Triton INT2 Kernel Exports
 from .otf_2bit_quantizer import OTF2BitQuantizer, OTF2BitLinear
 from .otf_triton_2bit_kernel import triton_2bit_gemm
 from .convert_2bit_universal import convert_model_to_2bit
@@ -29,7 +29,11 @@ from .run_triton_universal import TritonGlobalSymmetricLinear, run_inference, fi
 from .make_profile_universal import create_act_profile
 from .companion_memory import CompanionMemoryManager
 
-# MoE Offloader
+# RLM & Context-as-a-Variable Exports
+from .rlm_agent import ContextContainer, PythonREPLExecutor, RLMAgent
+from .run_rlm_file import run_rlm_on_file
+
+# MoE Offloader & Importer
 from .otf_moe_offloader import (
     Hierarchical3TierMoECache,
     MoEExpertLRUCache,
@@ -45,12 +49,16 @@ except ImportError:
         raise ImportError("`launch_web_demo` requires `gradio`. Please install it with `pip install gradio`.")
 
 __all__ = [
-    # v4.0 2-Bit Engine Exports
+    # v4.1 2-Bit Engine & RLM Exports
     "OTF2BitQuantizer",
     "OTF2BitLinear",
     "triton_2bit_gemm",
     "convert_model_to_2bit",
     "run_2bit_inference",
+    "ContextContainer",
+    "PythonREPLExecutor",
+    "RLMAgent",
+    "run_rlm_on_file",
     # Legacy INT4 Exports
     "QuantizedEmbedding",
     "GlobalSymmetricINT4Linear",
