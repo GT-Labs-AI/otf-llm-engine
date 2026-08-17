@@ -252,6 +252,14 @@ python otf_llm/run_2bit_universal.py ./models/Qwen-3B-2Bit Qwen/Qwen2.5-3B-Instr
 
 ---
 
+## 🙏 Acknowledgements & Research Inspiration
+
+The **Recursive Language Model (RLM / Context-as-a-Variable)** execution subsystem in OTF-LLM Engine was inspired by the pioneering research on recursive agent architectures and context-as-a-variable by **Prime Intellect** (creators of *Prime-Agent*). 
+
+GT Labs AI has engineered a fully autonomous, lightweight, Zero-VRAM local implementation optimized for sub-2.4GB consumer GPUs and 2-bit non-uniform quantization.
+
+---
+
 ## 📜 License
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for details.
