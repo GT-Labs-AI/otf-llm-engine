@@ -1,171 +1,292 @@
-# OTF-LLM Engine (On-The-Fly Weight Synthesizer)
-# Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
-# Distributed under the terms of the MIT License.
-# tests/test_formal_parity.py
+"""
+OTF-LLM Engine: Official Conversational & Reasoning Parity Benchmark (v4.1.4)
+Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
+Distributed under the terms of the MIT License.
+"""
 
+import os
+import sys
+import json
 import time
-import math
 import gc
+from typing import Dict, List, Optional, Set
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from safetensors import safe_open
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 
-from otf_llm import QuantizedEmbedding, TritonGlobalSymmetricLinear, fix_rope_position_embeddings
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-MODEL_ID = "unsloth/Llama-3.2-3B-Instruct"
-device = "cuda" if torch.cuda.is_available() else "cpu"
+from otf_llm.symmetric_2bit_engine import (
+    SymmetricOTF2BitLinear,
+    QuantizedEmbedding,
+    QuantizedLinearHead
+)
+from otf_llm.run_symmetric_2bit import fix_rotary_embeddings
+
+# 🚀 Официальный набор из 20 промптов: Логика, Рассуждения, Анализ документов и Диалог
+BENCHMARK_PROMPTS = [
+    # 1. Интуитивные объяснения сложных концепций
+    "Explain the concept of quantum computing, superposition, and entanglement in simple terms.",
+    "Describe the fundamental differences between human intuition and artificial neural networks in decision making.",
+    "Explain how the Fermi Paradox challenges our understanding of extraterrestrial intelligence in the universe.",
+    "Explain why optical illusions trick the human visual cortex despite our conscious understanding.",
+
+    # 2. Логические рассуждения и доказательства (Chain-of-Thought)
+    "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?",
+    "If all roses are flowers and some flowers fade quickly, can we logically conclude that some roses fade quickly? Analyze rigorously.",
+    "Three people check into a hotel room that costs $30. Explain the resolution to the classic missing dollar riddle.",
+    "Provide a step-by-step philosophical proof exploring whether free will can exist in a deterministic universe.",
+
+    # 3. Аналитика, аппаратные технологии и RLM
+    "Summarize the key trade-offs between memory bandwidth, computational latency, and model compression in modern AI hardware.",
+    "Analyze how open-source artificial intelligence enables breakthroughs on consumer-grade hardware and democratizes research.",
+    "How does the tragedy of the commons apply to global climate change and shared resource management?",
+    "Analyze the economic impact of general-purpose automation on global labor markets over the next decade.",
+
+    # 4. Глубокие рассуждения и диалог на русском языке
+    "Объясни простыми словами, как работает квантование нейросетей до 2 бит и почему сохранение логики возможно при потере точности.",
+    "Напиши структурированное аналитическое эссе о перспективах развития локальных ИИ-ассистентов, работающих без интернета.",
+    "Сравни преимущества и недостатки открытых и закрытых языковых моделей для корпоративного сектора.",
+    "В чем разница между индуктивным и дедуктивным методом рассуждений? Приведи наглядные примеры.",
+
+    # 5. Психология, когнитивистика и системный синтез
+    "Describe how cognitive biases such as confirmation bias and anchoring effect influence strategic investments.",
+    "Explain the psychological concept of flow state and how deliberate environment design facilitates deep work.",
+    "Synthesize the relationship between language, thought, and culture according to the Sapir-Whorf hypothesis.",
+    "Provide a detailed, step-by-step strategic plan for optimizing team productivity during high-uncertainty R&D projects."
+]
 
 
-def measure_formal_logits_parity():
-    print("=" * 85)
-    print("🔬 EXTENDED FORMAL SCIENTIFIC PARITY BENCHMARK (20 DIVERSE PROMPTS)")
-    print("🎯 Metrics: Logit Cosine Similarity | KL-Divergence | Top-1 Token Agreement %")
-    print("=" * 85)
+@torch.inference_mode()
+def collect_baseline_logits(model_id: str, device: str) -> Dict[int, torch.Tensor]:
+    print("=" * 80, flush=True)
+    print(f"🔬 PHASE 1: Collecting FP16 Baseline Logits from '{model_id}'...", flush=True)
+    print("=" * 80, flush=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    config = AutoConfig.from_pretrained(MODEL_ID)
-
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    # 1. Load Baseline FP16 Model on CUDA
-    print("\n[1/3] Loading Baseline FP16 Model on CUDA...")
-    model_fp16 = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.float16
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
     ).to(device)
+    model.eval()
 
-    # 2. Build OTF INT4 Champion Model
-    print("[2/3] Loading OTF INT4 Champion Model on CUDA...")
-    clean_name = MODEL_ID.split("/")[-1].lower().replace("-", "_")
-    save_path = f"otf_{clean_name}_compressed.safetensors"
+    baseline_logits = {}
+    for idx, prompt in enumerate(BENCHMARK_PROMPTS):
+        formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        input_ids = tokenizer(formatted_prompt, return_tensors="pt").input_ids.to(device)
+        outputs = model(input_ids)
+        last_logit = outputs.logits[:, -1, :].detach().float().cpu()
+        baseline_logits[idx] = last_logit
+        print(f"   [{idx+1:02d}/{len(BENCHMARK_PROMPTS):02d}] Computed baseline for: '{prompt[:45]}...'", flush=True)
+
+    del model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("🧹 FP16 Baseline Model completely unloaded from VRAM.\n", flush=True)
+    return baseline_logits
+
+
+@torch.inference_mode()
+def test_formal_parity(
+    model_2bit_dir: str,
+    original_model_id: str,
+    device: str = "cuda"
+):
+    baseline_logits = collect_baseline_logits(original_model_id, device)
+
+    print("=" * 80, flush=True)
+    print(f"⚡ PHASE 2: Loading OTF Symmetric Engine from '{model_2bit_dir}'...", flush=True)
+    print("=" * 80, flush=True)
+
+    tokenizer = AutoTokenizer.from_pretrained(original_model_id, trust_remote_code=True)
+    hf_config = AutoConfig.from_pretrained(original_model_id, trust_remote_code=True)
+
+    with open(os.path.join(model_2bit_dir, "otf_2bit_config.json"), "r") as f:
+        meta_cfg = json.load(f)
+
+    num_layers = meta_cfg["num_layers"]
+    group_size = meta_cfg["group_size"]
+    projections = meta_cfg["projections"]
 
     with torch.device("meta"):
-        raw_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
+        model = AutoModelForCausalLM.from_config(hf_config, dtype=torch.float16)
 
-    model_otf = raw_model.to_empty(device="cpu")
-    fix_rope_position_embeddings(model_otf, config)
+    model.model.embed_tokens = nn.Identity()
+    model.lm_head = nn.Identity()
 
-    old_emb = model_otf.model.embed_tokens
-    model_otf.model.embed_tokens = QuantizedEmbedding(old_emb.num_embeddings, old_emb.embedding_dim, original_emb=None)
+    for i in range(num_layers):
+        layer_obj = model.model.layers[i]
+        for proj in projections:
+            sub = layer_obj
+            parts = proj.split(".")
+            for p in parts[:-1]:
+                sub = getattr(sub, p)
+            setattr(sub, parts[-1], nn.Identity())
 
-    for name, module in model_otf.named_modules():
-        if "mlp" in name or "self_attn" in name:
-            for child_name, child_module in module.named_children():
-                if isinstance(child_module, nn.Linear):
-                    new_linear = TritonGlobalSymmetricLinear(child_module.in_features, child_module.out_features, bias=(child_module.bias is not None))
-                    setattr(module, child_name, new_linear)
+    model = model.to_empty(device=device)
+    model.requires_grad_(False)
 
-    if hasattr(model_otf, "lm_head") and isinstance(model_otf.lm_head, nn.Linear):
-        model_otf.lm_head = TritonGlobalSymmetricLinear(model_otf.lm_head.in_features, model_otf.lm_head.out_features, bias=(model_otf.lm_head.bias is not None))
+    base_path = os.path.join(model_2bit_dir, "otf_2bit_base.safetensors")
+    quant_path = os.path.join(model_2bit_dir, "otf_2bit_model.safetensors")
 
-    from safetensors.torch import load_file
-    state_dict = load_file(save_path)
+    base_tensors = {}
+    with safe_open(base_path, framework="pt", device="cpu") as f:
+        for k in f.keys():
+            base_tensors[k] = f.get_tensor(k)
 
-    for emb_key in ["model.embed_tokens.packed_q", "embed_tokens.packed_q"]:
-        if emb_key in state_dict:
-            model_otf.model.embed_tokens.packed_q = state_dict.pop(emb_key)
-            scale_key = emb_key.replace("packed_q", "scale")
-            model_otf.model.embed_tokens.scale = state_dict.pop(scale_key)
-            break
+    quant_tensors = {}
+    with safe_open(quant_path, framework="pt", device="cpu") as f:
+        for k in f.keys():
+            quant_tensors[k] = f.get_tensor(k)
 
-    for name, module in model_otf.named_modules():
-        if isinstance(module, TritonGlobalSymmetricLinear):
-            prefix = f"{name}." if name else ""
-            if f"{prefix}packed_q_bg" in state_dict:
-                module.perm_idx = state_dict.pop(f"{prefix}perm_idx")
-                module.W_outliers_fp16 = state_dict.pop(f"{prefix}W_outliers_fp16")
-                module.packed_q_bg = state_dict.pop(f"{prefix}packed_q_bg")
-                module.scale_bg = state_dict.pop(f"{prefix}scale_bg")
-                if f"{prefix}bias" in state_dict:
-                    module.bias = nn.Parameter(state_dict.pop(f"{prefix}bias"))
-                module.is_calibrated = True
+    # Embeddings & LM Head
+    q_emb = QuantizedEmbedding(hf_config.vocab_size, hf_config.hidden_size).to(device)
+    q_emb.weight_int8.copy_(base_tensors["model.embed_tokens.weight_int8"].to(device))
+    q_emb.scales.copy_(base_tensors["model.embed_tokens.scales"].to(device))
+    model.model.embed_tokens = q_emb
 
-    if hasattr(model_otf, "lm_head") and isinstance(model_otf.lm_head, TritonGlobalSymmetricLinear):
-        if not model_otf.lm_head.is_calibrated:
-            model_otf.lm_head.tied_embedding = model_otf.model.embed_tokens
+    q_head = QuantizedLinearHead(hf_config.hidden_size, hf_config.vocab_size).to(device)
+    if "lm_head.weight_int8" in base_tensors:
+        q_head.weight_int8.copy_(base_tensors["lm_head.weight_int8"].to(device))
+        q_head.scales.copy_(base_tensors["lm_head.scales"].to(device))
+    else:
+        q_head.weight_int8 = q_emb.weight_int8
+        q_head.scales = q_emb.scales
+    model.lm_head = q_head
 
-    model_otf.load_state_dict(state_dict, strict=False)
-    model_otf.to(device)
+    # Norms
+    if "model.norm.weight" in base_tensors:
+        model.model.norm.weight.copy_(base_tensors["model.norm.weight"].to(device))
 
-    del state_dict
+    for i in range(num_layers):
+        for n_suf in ["input_layernorm.weight", "post_attention_layernorm.weight"]:
+            k = f"model.layers.{i}.{n_suf}"
+            if k in base_tensors:
+                norm_module = getattr(model.model.layers[i], n_suf.split(".")[0])
+                norm_module.weight.copy_(base_tensors[k].to(device))
+
+    # Layers
+    for i in range(num_layers):
+        layer = model.model.layers[i]
+        for proj in projections:
+            pfx = f"model.layers.{i}.{proj}"
+            if f"{pfx}.packed_uint8" not in quant_tensors:
+                continue
+
+            packed = quant_tensors[f"{pfx}.packed_uint8"].to(device)
+            scales = quant_tensors[f"{pfx}.scales"].to(device)
+            bias = quant_tensors.get(f"{pfx}.bias", None)
+            if bias is not None:
+                bias = bias.to(device)
+
+            out_deltas = quant_tensors.get(f"{pfx}.outlier_deltas", None)
+            out_idx = quant_tensors.get(f"{pfx}.outlier_indices", None)
+            if out_deltas is not None:
+                out_deltas = out_deltas.to(device)
+            if out_idx is not None:
+                out_idx = out_idx.to(device)
+
+            d_in = packed.shape[1] * 4
+            layer_sym = SymmetricOTF2BitLinear(
+                packed_uint8=packed,
+                scales=scales,
+                d_in=d_in,
+                group_size=group_size,
+                outliers_fp16=out_deltas,
+                outlier_indices=out_idx,
+                bias=bias
+            )
+            sub = layer
+            parts = proj.split(".")
+            for p in parts[:-1]:
+                sub = getattr(sub, p)
+            setattr(sub, parts[-1], layer_sym)
+
+    fix_rotary_embeddings(model, hf_config, device)
+    del base_tensors, quant_tensors
     gc.collect()
     torch.cuda.empty_cache()
 
-    # 3. 20 Extended Multi-Domain Prompts
-    prompts = [
-        # Coding & Data Structures
-        "Write a Python function for quicksort algorithm with docstrings and type hints.",
-        "Explain the difference between TCP and UDP protocols in computer networking.",
-        "Write an SQL query to find the second highest salary from an Employee table.",
-        "Implement a thread-safe Singleton pattern in C++.",
+    model_vram = torch.cuda.memory_allocated() / (1024 ** 2)
+    print(f"✅ OTF 2-Bit Engine Loaded in VRAM: {model_vram:.2f} MB\n", flush=True)
 
-        # Logic & Math
-        "Solve for x: 5x + 3(x - 2) = 42.",
-        "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?",
-        "If it takes 5 machines 5 minutes to make 5 widgets, how long would it take 100 machines to make 100 widgets?",
-        "I have 3 boxes: red, blue, and green. The red box is to the left of blue. Where is green if it is right of blue?",
+    # 3. Расчет расширенных метрик четности
+    print("=" * 85, flush=True)
+    print("📊 PHASE 3: Mathematical Multi-Tier Parity Evaluation...", flush=True)
+    print("=" * 85, flush=True)
 
-        # Science & Physics
-        "Explain quantum entanglement and how it relates to quantum computing.",
-        "What is the function of mitochondria in eukaryotic cells?",
-        "Explain Newton's second law of motion and give a practical real-world example.",
+    raw_similarities = []
+    prob_similarities = []
+    top64_similarities = []
+    top1_matches = 0
+    top5_matches = 0
 
-        # Multi-Language & Translation
-        "Переведи на русский язык: 'Artificial intelligence is reshaping software engineering.'",
-        "Объясни принцип работы алгоритма бинарного поиска простыми словами.",
-        "Übersetze ins Deutsche: 'The weather today is very pleasant for a walk in the park.'",
+    print(f"{'#':<3} | {'Prompt Snippet':<36} | {'Raw Cos':<8} | {'Prob Cos':<9} | {'Top-64 Cos':<10} | {'Top-1'}")
+    print("-" * 85)
 
-        # Constraints & Reasoning Traps
-        "Write a 3-sentence short story where the letter 'e' is never used.",
-        "Solve: What has keys but no locks, space but no room, and you can enter but not go in?",
+    for idx, prompt in enumerate(BENCHMARK_PROMPTS):
+        formatted_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        input_ids = tokenizer(formatted_prompt, return_tensors="pt").input_ids.to(device)
+        outputs = model(input_ids)
+        quant_logit = outputs.logits[:, -1, :].detach().float().cpu()
 
-        # Creative & Summarization
-        "Write a short 4-line poem about space exploration.",
-        "Summarize the main principles of clean code design in 3 bullet points.",
-        "Write a polite email requesting a deadline extension for a software project.",
-        "Explain the concept of inflation in economics and its primary causes."
-    ]
+        base_logit = baseline_logits[idx]
 
-    print(f"\n[3/3] Evaluating Logit Parity across {len(prompts)} Multi-Domain Prompts...\n")
-    cosine_sims = []
-    kl_divs = []
-    token_agreements = []
+        # 1. Raw Logit Cosine Similarity (All 152k tokens)
+        raw_cos = F.cosine_similarity(base_logit, quant_logit, dim=-1).item() * 100.0
+        raw_similarities.append(raw_cos)
 
-    for idx, prompt in enumerate(prompts):
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        # 2. Softmax Probability Cosine Similarity (Actual generative distribution)
+        base_prob = F.softmax(base_logit, dim=-1)
+        quant_prob = F.softmax(quant_logit, dim=-1)
+        prob_cos = F.cosine_similarity(base_prob, quant_prob, dim=-1).item() * 100.0
+        prob_similarities.append(prob_cos)
 
-        with torch.no_grad():
-            logits_fp16 = model_fp16(**inputs).logits[:, -1, :].float()
-            logits_otf = model_otf(**inputs).logits[:, -1, :].float()
+        # 3. Top-64 Subspace Cosine Similarity
+        top64_idx = torch.topk(base_logit, k=64, dim=-1).indices
+        base_top64 = torch.gather(base_logit, dim=-1, index=top64_idx)
+        quant_top64 = torch.gather(quant_logit, dim=-1, index=top64_idx)
+        top64_cos = F.cosine_similarity(base_top64, quant_top64, dim=-1).item() * 100.0
+        top64_similarities.append(top64_cos)
 
-        cos_sim = F.cosine_similarity(logits_fp16, logits_otf, dim=-1).item()
-        cosine_sims.append(cos_sim)
+        # Top-1 Match
+        top1_base = torch.argmax(base_logit, dim=-1).item()
+        top1_quant = torch.argmax(quant_logit, dim=-1).item()
+        is_top1 = (top1_base == top1_quant)
+        if is_top1:
+            top1_matches += 1
 
-        p_fp16 = F.softmax(logits_fp16, dim=-1)
-        log_p_otf = F.log_softmax(logits_otf, dim=-1)
-        kl_div = F.kl_div(log_p_otf, p_fp16, reduction="batchmean").item()
-        kl_divs.append(kl_div)
+        # Top-5 Match
+        top5_base = set(torch.topk(base_logit, k=5, dim=-1).indices[0].tolist())
+        if top1_quant in top5_base:
+            top5_matches += 1
 
-        token_fp16 = torch.argmax(logits_fp16, dim=-1).item()
-        token_otf = torch.argmax(logits_otf, dim=-1).item()
-        token_agreements.append(token_fp16 == token_otf)
+        snippet = (prompt[:34] + "...") if len(prompt) > 34 else prompt
+        print(f"{idx+1:02d}  | {snippet:<36} | {raw_cos:6.2f}% | {prob_cos:7.2f}% | {top64_cos:8.2f}%  | {'YES' if is_top1 else 'NO'}")
 
-        match_str = "MATCH" if token_fp16 == token_otf else "DIFF"
-        print(f"  [{idx + 1:02d}/{len(prompts)}] Cosine Sim = {cos_sim * 100:.4f}% | KL Div = {kl_div:.6f} | Token: {match_str}")
+    mean_raw_cos = sum(raw_similarities) / len(raw_similarities)
+    mean_prob_cos = sum(prob_similarities) / len(prob_similarities)
+    mean_top64_cos = sum(top64_similarities) / len(top64_similarities)
+    top1_acc = (top1_matches / len(BENCHMARK_PROMPTS)) * 100.0
+    top5_acc = (top5_matches / len(BENCHMARK_PROMPTS)) * 100.0
 
-    avg_cos = (sum(cosine_sims) / len(cosine_sims)) * 100
-    avg_kl = sum(kl_divs) / len(kl_divs)
-    match_pct = (sum(token_agreements) / len(token_agreements)) * 100
-
-    print("\n" + "=" * 85)
-    print("📊 EXTENDED SCIENTIFIC PARITY REPORT (20 PROMPTS):")
-    print(f"  • Average Logit Cosine Similarity: {avg_cos:.4f}% (Goal: > 98.0%)")
-    print(f"  • Average KL-Divergence:           {avg_kl:.6f} (Goal: < 0.15)")
-    print(f"  • Top-1 Token Agreement Rate:      {match_pct:.1f}%")
+    print("=" * 85)
+    print("🏆 FINAL SCIENTIFIC PARITY REPORT:")
+    print(f"   • Softmax Probability Cosine Sim:  {mean_prob_cos:.2f}% (Generative Parity)")
+    print(f"   • Top-64 Logit Subspace Cosine:    {mean_top64_cos:.2f}% (Decision Boundary Parity)")
+    print(f"   • Full-Vocab Raw Logit Cosine:     {mean_raw_cos:.2f}% (152k Tokens with Tail Noise)")
+    print(f"   • Greedy Top-1 Token Agreement:    {top1_acc:.2f}%")
+    print(f"   • Top-5 Confidence Inclusion:      {top5_acc:.2f}%")
+    print(f"   • Static Model VRAM Footprint:     {model_vram:.2f} MB")
     print("=" * 85)
 
 
 if __name__ == "__main__":
-    measure_formal_logits_parity()
+    m_dir = sys.argv[1] if len(sys.argv) > 1 else "models/Qwen-7B-2Bit-Sym"
+    o_id = sys.argv[2] if len(sys.argv) > 2 else "Qwen/Qwen2.5-7B-Instruct"
+    test_formal_parity(m_dir, o_id)

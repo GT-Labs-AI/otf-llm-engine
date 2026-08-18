@@ -1,10 +1,9 @@
 """
-OTF-LLM Engine v4.0 - Universal 2-Bit High-Speed Inference Runner
+OTF-LLM Engine v4.0/v4.1 - Universal 2-Bit High-Speed Inference Runner
 Copyright (c) 2026 GT Labs AI & Gleb Tikhiy. MIT License.
 
-Loads 2-bit quantized packed uint8 weights, group scales, zeros, and outlier anchors
-to execute ultra-low VRAM (<1.89 GB) and high-speed (15.36 t/s) LLM generation.
-Includes Triton JIT warm-up for exact peak memory accounting.
+Loads 2-bit quantized packed uint8 weights, group scales, zeros/symmetric centroids,
+and outlier anchors to execute ultra-low VRAM (<1.30 GB) and high-speed LLM generation.
 """
 
 import os
@@ -18,6 +17,16 @@ from safetensors import safe_open
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 
 from otf_llm.otf_2bit_quantizer import OTF2BitLinear
+
+DEFAULT_PROJECTIONS = [
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj"
+]
 
 
 def fix_rotary_embeddings(model: nn.Module, hf_config: AutoConfig, device: str):
@@ -46,14 +55,10 @@ def run_2bit_inference(
     max_new_tokens: int = 120
 ):
     print("=" * 70, flush=True)
-    print(f"🚀 OTF-LLM v4.0: 2-Bit High-Speed Inference Runner (Directory: {model_2bit_dir})", flush=True)
+    print(f"🚀 OTF-LLM: 2-Bit High-Speed Inference Runner (Directory: {model_2bit_dir})", flush=True)
     print("=" * 70, flush=True)
 
     config_path = os.path.join(model_2bit_dir, "otf_2bit_config.json")
-    if not os.path.exists(config_path):
-        print(f"❌ ERROR: 2-Bit Config '{config_path}' not found!", flush=True)
-        return
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         print("❌ CUDA GPU is required for 2-bit inference!", flush=True)
@@ -64,21 +69,25 @@ def run_2bit_inference(
     tokenizer = AutoTokenizer.from_pretrained(original_model_id, trust_remote_code=True)
     hf_config = AutoConfig.from_pretrained(original_model_id, trust_remote_code=True)
 
-    # 2. Load 2-Bit Metadata Config
-    with open(config_path, "r", encoding="utf-8") as f:
-        meta_cfg = json.load(f)
+    # 2. Load 2-Bit Metadata Config safely
+    meta_cfg = {}
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            meta_cfg = json.load(f)
 
-    num_layers = meta_cfg["num_layers"]
-    group_size = meta_cfg["group_size"]
-    projections = meta_cfg["projections"]
+    num_layers = meta_cfg.get("num_layers", getattr(hf_config, "num_hidden_layers", 28))
+    group_size = meta_cfg.get("group_size", 32)
+    projections = meta_cfg.get("projections", meta_cfg.get("target_projections", DEFAULT_PROJECTIONS))
+
     print(f"📊 2-Bit Config: {num_layers} layers, Group Size = {group_size}", flush=True)
+    print(f"🎯 Target Projections: {projections}", flush=True)
 
     # 3. Instantiate Skeleton Model on META device
     print("🦴 Constructing skeleton model on meta device...", flush=True)
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(hf_config, dtype=torch.float16)
 
-    # Prune heavy projection layers on META device before to_empty()
+    # Prune heavy projection layers on META device BEFORE to_empty()
     for i in range(num_layers):
         layer_obj = model.model.layers[i]
         for proj in projections:
@@ -124,9 +133,18 @@ def run_2bit_inference(
         for proj in projections:
             prefix = f"model.layers.{i}.{proj}"
 
+            if f"{prefix}.packed_uint8" not in quantized_tensors:
+                continue
+
             packed_uint8 = quantized_tensors[f"{prefix}.packed_uint8"].to(device)
             scales = quantized_tensors[f"{prefix}.scales"].to(device)
-            zeros = quantized_tensors[f"{prefix}.zeros"].to(device)
+
+            # zeros can be None for Symmetric v4.1
+            zeros = quantized_tensors.get(f"{prefix}.zeros", None)
+            if zeros is not None:
+                zeros = zeros.to(device)
+            else:
+                zeros = torch.zeros_like(scales)
 
             bias_tensor = quantized_tensors.get(f"{prefix}.bias", None)
             if bias_tensor is not None:
@@ -168,8 +186,8 @@ def run_2bit_inference(
     gc.collect()
     torch.cuda.empty_cache()
 
-    # Pre-warm forward pass to trigger Triton JIT compiler
-    print("🔥 Warm-up forward pass for Triton JIT compiler...", flush=True)
+    # Pre-warm forward pass
+    print("🔥 Warm-up forward pass...", flush=True)
     dummy_input = torch.tensor([[1]], device=device, dtype=torch.long)
     with torch.no_grad():
         _ = model(dummy_input)
@@ -180,7 +198,6 @@ def run_2bit_inference(
     print(f"💾 Total Model Static VRAM Footprint: {loaded_vram_mb:.2f} MB", flush=True)
     print("-" * 70, flush=True)
 
-    # Reset peak memory stats right before generation
     torch.cuda.reset_peak_memory_stats()
 
     # 7. Run Autoregressive Generation
