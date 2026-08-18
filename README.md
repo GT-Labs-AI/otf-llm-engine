@@ -120,7 +120,7 @@ For each group $W_g \in \mathbb{R}^G$ and assigned centroids $C_q \in \mathcal{C
 $$\min_{S_g} \sum_{i \in \text{active}} \left( W_{g, i} - S_g \cdot C_{q_i} \right)^2 \implies S_g = \frac{\sum_{i \in \text{active}} W_{g, i} \cdot C_{q_i}}{\sum_{i \in \text{active}} C_{q_i}^2 + \epsilon}$$
 
 4 2-bit weights are bit-packed into a single `uint8` byte:
-$$\text{byte} = (q_0 \ \& \ 0x03) \;|\; ((q_1 \ \& \ 0x03) \ll 2) \;|\; ((q_2 \ \& \ 0x03) \ll 4) \;|\; ((q_3 \ \& \ 0x03) \ll 6)$$
+$$\text{byte} = (q_0 \mathbin{\&} 0x03) \mid ((q_1 \mathbin{\&} 0x03) \ll 2) \mid ((q_2 \mathbin{\&} 0x03) \ll 4) \mid ((q_3 \mathbin{\&} 0x03) \ll 6)$$
 achieving an exact footprint of **0.25 bytes per parameter**.
 
 ---
@@ -370,4 +370,9 @@ Having established the **46.2% Zero-Shot Capability Baseline**, the next researc
 
 ## 📜 License
 
-Distributed under the MIT License. Copyright (c) 2026 GT Labs AI & Gleb Tikhiy.
+This project is open-source and distributed under the terms of the **[MIT License](LICENSE)**.
+
+```text
+Copyright (c) 2026 GT Labs AI & Gleb Tikhiy <team.gtlabs@gmail.com>
+```
+*See the full [LICENSE](LICENSE) file for details.*

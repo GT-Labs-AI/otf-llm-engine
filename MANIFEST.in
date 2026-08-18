@@ -1,7 +1,15 @@
 include LICENSE
 include README.md
+include pyproject.toml
+include setup.py
+
+# Включаем все Python файлы и markdown-промпты агента
 recursive-include otf_llm *.py
+recursive-include otf_llm/prompts *.md
+
+# Исключаем кэш компиляции и тяжелые бинарные веса
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
 recursive-exclude * *.safetensors
 recursive-exclude * *.pt
+recursive-exclude * *.bin
